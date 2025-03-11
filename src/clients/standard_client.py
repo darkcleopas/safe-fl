@@ -1,0 +1,397 @@
+import logging
+import numpy as np
+import tensorflow as tf
+import requests
+import time
+import base64
+import io
+import json
+from typing import Dict, Any, Tuple, List, Optional
+
+from src.utils.model_factory import ModelFactory
+from src.utils.dataset_factory import DatasetFactory
+
+
+class FLClient:
+    """
+    Cliente base para Federated Learning.
+    """
+    def __init__(self, client_id: int, config: Dict[str, Any], server_url: str = None):
+        """
+        Inicializa o cliente com a configuração fornecida.
+        
+        Args:
+            client_id: ID único do cliente
+            config: Dicionário com a configuração do cliente
+            server_url: URL do servidor FL
+        """
+        self.client_id = client_id
+        self.config = config
+        
+        # Configurações de subseções
+        self.experiment_config = config['experiment']
+        self.model_config = config['model']
+        self.dataset_config = config['dataset']
+        self.clients_config = config['clients']
+        self.server_config = config['server']
+        
+        # URL do servidor
+        if server_url:
+            self.server_url = server_url
+        else:
+            self.server_url = f"http://{self.server_config['address']}"
+        
+        # Definir seed para reprodutibilidade
+        self.seed = self.experiment_config.get('seed', 42)
+        tf.random.set_seed(self.seed)
+        np.random.seed(self.seed)
+        
+        # Configurar logging
+        self.setup_logging()
+        
+        # # Configurar recurso computacional
+        # self.setup_resource()
+        
+        # Carregar dados
+        self.load_data()
+        
+        # O modelo será recebido do servidor
+        self.model = None
+        
+        # Estado do treinamento
+        self.current_round = 0
+        self.is_selected = False
+        
+        self.logger.info(f"Cliente {client_id} inicializado com sucesso")
+    
+    def setup_logging(self):
+        """Configura o sistema de logging."""
+        log_level = self.experiment_config.get('log_level', 'info').upper()
+        logging.basicConfig(
+            level=getattr(logging, log_level),
+            format='%(asctime)s - %(name)s - %(levelname)s - %(message)s'
+        )
+        self.logger = logging.getLogger(f"FLClient-{self.client_id}")
+    
+    # def setup_resource(self):
+    #     """Define os recursos computacionais do cliente (simulado)."""
+    #     # Simular capacidades de computação variáveis
+    #     min_capability = self.clients_config['resource_constraints']['min_computation_capability']
+    #     max_capability = self.clients_config['resource_constraints']['max_computation_capability']
+        
+    #     # Usar o seed e o ID do cliente para garantir recursos consistentes
+    #     np.random.seed(self.seed + self.client_id)
+    #     self.computation_capability = np.random.uniform(min_capability, max_capability)
+        
+    #     self.logger.info(f"Capacidade computacional: {self.computation_capability:.2f} GHz")
+    
+    def load_data(self):
+        """Carrega os dados do cliente."""
+        
+        dataset_factory = DatasetFactory()
+        self.x_train, self.y_train, self.x_test, self.y_test, self.num_classes = dataset_factory.load_dataset(
+            dataset_name=self.dataset_config['name'],
+            client_id=self.client_id,
+            num_clients=self.clients_config['num_clients'],
+            non_iid=self.dataset_config['non_iid'],
+            seed=self.seed
+        )
+        
+        self.num_examples = len(self.x_train)
+        self.logger.info(f"Dados carregados: {self.num_examples} exemplos de treinamento")
+    
+    def serialize_model_weights(self, weights: List[np.ndarray]) -> List[str]:
+        """
+        Serializa os pesos do modelo para transferência via API.
+        
+        Args:
+            weights: Lista de arrays numpy com os pesos do modelo
+            
+        Returns:
+            Lista de strings base64 representando os pesos
+        """
+        serialized_weights = []
+        
+        for w in weights:
+            # Serializar cada array numpy para bytes
+            bytes_io = io.BytesIO()
+            np.save(bytes_io, w, allow_pickle=True)
+            bytes_io.seek(0)
+            
+            # Converter para base64
+            serialized = base64.b64encode(bytes_io.read()).decode('utf-8')
+            serialized_weights.append(serialized)
+        
+        return serialized_weights
+    
+    def deserialize_model_weights(self, serialized_weights: List[str]) -> List[np.ndarray]:
+        """
+        Desserializa os pesos do modelo recebidos via API.
+        
+        Args:
+            serialized_weights: Lista de strings base64 representando os pesos
+            
+        Returns:
+            Lista de arrays numpy com os pesos do modelo
+        """
+        weights = []
+        
+        for w_str in serialized_weights:
+            # Decodificar base64 para bytes
+            bytes_data = base64.b64decode(w_str.encode('utf-8'))
+            bytes_io = io.BytesIO(bytes_data)
+            
+            # Carregar array numpy
+            w = np.load(bytes_io, allow_pickle=True)
+            weights.append(w)
+        
+        return weights
+    
+    def fetch_model(self) -> bool:
+        """
+        Busca o modelo global do servidor.
+        
+        Returns:
+            True se o modelo foi atualizado com sucesso, False caso contrário
+        """
+        try:
+            self.logger.info("Buscando modelo global do servidor")
+            response = requests.get(f"{self.server_url}/model")
+            
+            if response.status_code != 200:
+                self.logger.error(f"Erro ao buscar modelo: {response.status_code}")
+                return False
+            
+            data = response.json()
+            weights = self.deserialize_model_weights(data['weights'])
+            round_num = data['round']
+            
+            # Atualizar o modelo com os novos pesos
+            if self.model is None:
+                self.initialize_model(weights)
+            else:
+                self.model.set_weights(weights)
+            
+            self.current_round = round_num
+            self.logger.info(f"Modelo atualizado com sucesso (Rodada {round_num})")
+            return True
+            
+        except Exception as e:
+            self.logger.error(f"Erro ao buscar modelo: {str(e)}")
+            return False
+    
+    def initialize_model(self, weights: List[np.ndarray]):
+        """
+        Inicializa o modelo com os pesos fornecidos.
+        
+        Args:
+            weights: Lista de arrays numpy com os pesos do modelo
+        """
+        
+        # Inicializar o modelo
+        model_factory = ModelFactory()
+        self.model = model_factory.create_model(
+            model_name=self.model_config['type'],
+            input_shape=self.x_train.shape,
+            num_classes=self.num_classes
+        )
+        
+        # Definir os pesos
+        self.model.set_weights(weights)
+        self.logger.info("Modelo inicializado com os pesos do servidor")
+    
+    def check_round(self) -> Tuple[bool, bool]:
+        """
+        Verifica o status da rodada atual no servidor.
+        
+        Returns:
+            Tupla (is_selected, training_complete)
+        """
+        try:
+            response = requests.get(f"{self.server_url}/round")
+            
+            if response.status_code != 200:
+                self.logger.error(f"Erro ao verificar rodada: {response.status_code}")
+                return False, False
+            
+            data = response.json()
+            self.current_round = data['round']
+            
+            # Verficar se o cliente já enviou a atualização
+            is_round_complete_for_client = self.client_id in data['updates_received']
+
+            # Verificar se este cliente foi selecionado
+            is_selected = self.client_id in data['selected_clients']
+
+            # Verificar se o treinamento está completo
+            training_complete = data['training_complete']
+            
+            if is_selected and not is_round_complete_for_client:
+                self.logger.info(f"Cliente selecionado para a rodada {self.current_round}")
+            
+            return is_selected, training_complete, is_round_complete_for_client
+            
+        except Exception as e:
+            self.logger.error(f"Erro ao verificar rodada: {str(e)}")
+            return False, False
+    
+    def train_model(self) -> Tuple[List[np.ndarray], int]:
+        """
+        Treina o modelo local com os dados do cliente.
+        
+        Returns:
+            Tupla contendo os pesos do modelo treinado e o número de exemplos usados
+        """
+        if self.model is None:
+            self.logger.error("Modelo não inicializado. É necessário buscar o modelo primeiro.")
+            raise ValueError("Modelo não inicializado")
+        
+        # Parâmetros de treinamento
+        local_epochs = self.model_config['local_epochs']
+        batch_size = self.model_config['batch_size']
+        
+        # Ajustar o número de épocas com base na capacidade computacional
+        # Clientes com menor capacidade podem treinar menos épocas
+        # effective_epochs = max(1, int(local_epochs * (self.computation_capability / 4.0)))
+        effective_epochs = local_epochs
+        self.logger.info(f"Iniciando treinamento local por {effective_epochs} épocas")
+        
+        # Treinar o modelo
+        history = self.model.fit(
+            self.x_train, 
+            self.y_train,
+            epochs=effective_epochs,
+            batch_size=batch_size,
+            verbose=1
+        )
+        
+        # Logs de métricas
+        final_loss = history.history['loss'][-1]
+        final_accuracy = history.history['accuracy'][-1]
+        self.logger.info(f"Treinamento concluído. Loss: {final_loss:.4f}, Accuracy: {final_accuracy:.4f}")
+        
+        return self.model.get_weights(), self.num_examples, final_loss, final_accuracy
+    
+    def evaluate_model(self) -> Dict[str, float]:
+        """
+        Avalia o modelo local nos dados de teste do cliente.
+        
+        Returns:
+            Dicionário com métricas de avaliação
+        """
+        if self.model is None:
+            self.logger.error("Modelo não inicializado. É necessário buscar o modelo primeiro.")
+            raise ValueError("Modelo não inicializado")
+        
+        results = self.model.evaluate(self.x_test, self.y_test, verbose=0)
+        metrics = {
+            'loss': float(results[0]),
+            'accuracy': float(results[1])
+        }
+        
+        self.logger.info(f"Avaliação do modelo local: {metrics}")
+        return metrics
+    
+    def submit_update(
+        self,
+        weights: List[np.ndarray],
+        num_examples: int,
+        loss: float,
+        accuracy: float
+    ) -> bool:
+        """
+        Envia os pesos do modelo treinado para o servidor.
+        
+        Args:
+            weights: Pesos do modelo treinado
+            num_examples: Número de exemplos usados no treinamento
+            
+        Returns:
+            True se o envio foi bem-sucedido, False caso contrário
+        """
+        try:
+            # Serializar os pesos
+            serialized_weights = self.serialize_model_weights(weights)
+            
+            # Preparar payload
+            payload = {
+                'client_id': self.client_id,
+                'weights': serialized_weights,
+                'num_examples': num_examples,
+                'local_loss': loss,
+                'local_accuracy': accuracy
+            }
+            
+            # Enviar para o servidor
+            self.logger.info(f"Enviando atualização para o servidor (Rodada {self.current_round})")
+            response = requests.post(f"{self.server_url}/update", json=payload)
+            
+            if response.status_code != 200:
+                self.logger.error(f"Erro ao enviar atualização: {response.status_code}")
+                return False
+            
+            data = response.json()
+            if data.get('status') == 'accepted':
+                self.logger.info("Atualização aceita pelo servidor")
+                return True
+            else:
+                self.logger.warning(f"Atualização rejeitada: {data.get('reason')}")
+                return False
+            
+        except Exception as e:
+            self.logger.error(f"Erro ao enviar atualização: {str(e)}")
+            return False
+    
+    def training_loop(self):
+        """
+        Loop principal de treinamento do cliente.
+        """
+        self.logger.info("Iniciando loop de treinamento")
+        
+        try:
+            # Buscar modelo inicial
+            if not self.fetch_model():
+                self.logger.error("Não foi possível obter o modelo inicial")
+                return
+            
+            while True:
+                # Verificar status da rodada
+                is_selected, training_complete, is_round_complete_for_client = self.check_round()
+                
+                if training_complete:
+                    self.logger.info("Treinamento federado concluído")
+                    # Buscar o modelo final
+                    self.fetch_model()
+                    # Avaliar o modelo final
+                    metrics = self.evaluate_model()
+                    self.logger.info(f"Métricas finais: {json.dumps(metrics)}")
+                    break
+
+                if is_round_complete_for_client:
+                    self.logger.info("Atualização já enviada para a rodada atual. Aguardando próxima rodada...")
+                    time.sleep(10)
+                    continue
+                
+                if is_selected:
+                    # Buscar o modelo atual
+                    if not self.fetch_model():
+                        self.logger.error("Falha ao buscar o modelo. Tentando novamente...")
+                        time.sleep(5)
+                        continue
+                    
+                    # Treinar o modelo
+                    weights, num_examples, loss, accuracy = self.train_model()
+                    
+                    # Enviar atualização
+                    if not self.submit_update(weights, num_examples, loss, accuracy):
+                        self.logger.error("Falha ao enviar atualização. Tentando novamente...")
+                        time.sleep(5)
+                        continue
+                
+                # Aguardar antes da próxima verificação
+                time.sleep(3)
+                
+        except KeyboardInterrupt:
+            self.logger.info("Treinamento interrompido pelo usuário")
+        except Exception as e:
+            self.logger.error(f"Erro no loop de treinamento: {str(e)}")
