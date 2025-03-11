@@ -96,12 +96,13 @@ class FLServer:
         """Inicializa o modelo global baseado na configuração."""
         
         dataset_factory = DatasetFactory()
-        x_train, y_train, x_test, y_test, num_classes = dataset_factory.load_dataset(
+        _, _, x_test, y_test, num_classes = dataset_factory.load_dataset(
             dataset_name=self.dataset_config['name'],
             client_id=0,  # Servidor tem ID 0
             num_clients=self.clients_config['num_clients'],
-            non_iid=self.dataset_config['non_iid'],
-            seed=self.seed
+            non_iid=False,
+            seed=self.seed,
+            split="test"
         )
         
         self.x_test = x_test
@@ -111,7 +112,7 @@ class FLServer:
         model_factory = ModelFactory()
         self.model = model_factory.create_model(
             model_name=self.model_config['type'],
-            input_shape=x_train.shape,
+            input_shape=x_test.shape,
             num_classes=num_classes
         )
         
@@ -168,7 +169,7 @@ class FLServer:
         Args:
             updates: Lista de tuplas (pesos_modelo, num_exemplos)
         """
-        aggregation_strategy = self.server_config['strategy']
+        aggregation_strategy = self.server_config['aggregation_strategy']
         
         if aggregation_strategy == 'FED_AVG':
             self._aggregate_fed_avg(updates)

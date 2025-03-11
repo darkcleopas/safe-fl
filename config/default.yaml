@@ -5,35 +5,33 @@ experiment:
   name: "base_scenario"
   description: "Cenário base de Federated Learning sem ataques ou defesas"
   seed: 42
-  rounds: 2
+  rounds: 15
   output_dir: "./results"
   log_level: "info"
 
 # Configurações do dataset
 dataset:
   name: "SIGN"  # Opções: MNIST, SIGN, CIFAR10, etc.
-  non_iid: false  # Distribuição não-IID entre clientes
+  non_iid: true  # Distribuição não-IID entre clientes
 
 # Configurações do modelo
 model:
   type: "CNN_SIGN"  # Tipo de modelo (CNN_SIGN, DNN, VGG, GENERIC_MODEL)
-  local_epochs: 2
+  local_epochs: 5
   batch_size: 32
 
 # Configurações do servidor (RSU)
 server:
-  type: "base_server"  # Tipo de servidor (base, com defesas, etc.)
+  type: "standard"  # Tipo de servidor (base, com defesas, etc.)
   address: "0.0.0.0:8000"  # Endereço dentro da rede Docker
-  strategy: "FED_AVG"  # Estratégia de agregação
+  aggregation_strategy: "FED_AVG"  # Estratégia de agregação
   selection_strategy: "random"  # Estratégia de seleção de clientes
   selection_fraction: 1.0  # Fração de clientes selecionados por round
   evaluation_interval: 1  # Intervalo de avaliação do modelo global (em rounds)
 
-
 # Configurações dos clientes
 clients:
-  num_clients: 2  # Número total de clientes
-  local_epochs: 1  # Número de épocas locais
-  batch_size: 32  # Tamanho do batch
+  num_clients: 5  # Número total de clientes
+  honest_client_type: "standard"  # Tipo de cliente honesto (base, com defesas, etc.)
   malicious_percentage: 0.0  # Porcentagem de clientes maliciosos (0 para cenário base)
-
+  malicious_type: null  # Tipo de ataque malicioso (data_poisoning, model_poisoning, etc.)

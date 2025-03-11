@@ -1,4 +1,4 @@
-FROM python:3.9-slim
+FROM python:3.10-slim
 
 WORKDIR /app
 
@@ -38,7 +38,6 @@ EXPOSE 8000
 
 # Configurações de ambiente
 ENV PYTHONPATH=/app
-ENV CONFIG_PATH=/app/config/default.yaml
 
 # Executar o servidor
-CMD ["python", "main_server.py"]
+CMD ["python", "run_server.py"]

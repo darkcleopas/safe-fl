@@ -24,8 +24,7 @@ class DatasetFactory:
         num_clients: int, 
         non_iid: bool = False,
         seed: Optional[int] = None,
-        split: str = "train",
-        is_malicious: bool = False
+        split: str = "train"
     ) -> Tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray, int]:
         """
         Carrega o dataset especificado e particiona para federated learning.
@@ -37,7 +36,6 @@ class DatasetFactory:
             non_iid: Se verdadeiro, particiona os dados de forma não-IID
             seed: Seed para reprodutibilidade
             split: "train" ou "test" para carregar partições específicas
-            is_malicious: Se o cliente é malicioso (para simulação de ataques)
             
         Returns:
             Tupla (x_train, y_train, x_test, y_test, num_classes)
@@ -47,82 +45,12 @@ class DatasetFactory:
             np.random.seed(seed)
             tf.random.set_seed(seed)
         
-        if dataset_name == "MNIST":
-            return self.load_mnist(client_id, num_clients, non_iid, is_malicious)
-        elif dataset_name == "SIGN":
-            return self.load_sign(client_id, num_clients, non_iid, split, is_malicious)
-        elif dataset_name == "CIFAR10":
-            return self.load_cifar10(client_id, num_clients, non_iid, is_malicious)
+        if dataset_name == "SIGN":
+            return self.load_sign(client_id, num_clients, non_iid, split)
         else:
             # Dataset padrão se o tipo não for reconhecido
-            print(f"Dataset '{dataset_name}' não reconhecido. Usando MNIST.")
-            return self.load_mnist(client_id, num_clients, non_iid, is_malicious)
-    
-    def load_mnist(
-        self, 
-        client_id: int, 
-        num_clients: int, 
-        non_iid: bool = False,
-        is_malicious: bool = False
-    ) -> Tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray, int]:
-        """
-        Carrega o dataset MNIST e particiona para federated learning.
-        
-        Args:
-            client_id: ID do cliente (0 para o servidor)
-            num_clients: Número total de clientes
-            non_iid: Se verdadeiro, particiona os dados de forma não-IID
-            is_malicious: Se o cliente é malicioso (para simulação de ataques)
-            
-        Returns:
-            Tupla (x_train, y_train, x_test, y_test, num_classes)
-        """
-        print(f"Carregando MNIST para cliente {client_id}")
-        
-        # Carregar dados MNIST
-        (x_train, y_train), (x_test, y_test) = tf.keras.datasets.mnist.load_data()
-        
-        # Normalizar
-        x_train, x_test = x_train / 255.0, x_test / 255.0
-        
-        # Particionar dados se não for o servidor (client_id > 0)
-        if client_id > 0:
-            if non_iid:
-                # Carregar partição não-IID pré-definida
-                try:
-                    pickle_path = f'data/MNIST/{num_clients}/idx_train_{client_id-1}.pickle'
-                    with open(pickle_path, 'rb') as handle:
-                        idx_train = pickle.load(handle)
-                    
-                    pickle_path = f'data/MNIST/{num_clients}/idx_test_{client_id-1}.pickle'
-                    with open(pickle_path, 'rb') as handle:
-                        idx_test = pickle.load(handle)
-                    
-                    x_train = x_train[idx_train]
-                    y_train = y_train[idx_train]
-                    
-                    x_test = x_test[idx_test]
-                    y_test = y_test[idx_test]
-                except Exception as e:
-                    print(f"Erro ao carregar particões não-IID: {e}")
-                    print("Usando particionamento simples como fallback")
-                    # Fallback para particionamento simples
-                    x_train, y_train, x_test, y_test = self._partition_data(
-                        x_train, y_train, x_test, y_test, client_id, num_clients
-                    )
-            else:
-                # Particionamento simples (IID)
-                x_train, y_train, x_test, y_test = self._partition_data(
-                    x_train, y_train, x_test, y_test, client_id, num_clients
-                )
-        
-        # Simular comportamento malicioso (label flipping)
-        if is_malicious:
-            y_train = self._flip_labels(y_train)
-            y_test = self._flip_labels(y_test)
-            print(f"Labels invertidos para cliente malicioso {client_id}")
-        
-        return x_train, y_train, x_test, y_test, 10
+            print(f"Dataset '{dataset_name}' não reconhecido. Usando SIGN.")
+            return self.load_sign(client_id, num_clients, non_iid, split)
     
     def load_sign(
         self, 
@@ -130,7 +58,6 @@ class DatasetFactory:
         num_clients: int, 
         non_iid: bool = False,
         split: str = "train",
-        is_malicious: bool = False
     ) -> Tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray, int]:
         """
         Carrega o dataset SIGN (German Traffic Signs) e particiona para federated learning.
@@ -145,18 +72,18 @@ class DatasetFactory:
         Returns:
             Tupla (x_train, y_train, x_test, y_test, num_classes)
         """
-        print(f"Carregando SIGN para cliente {client_id}")
+        print(f"Carregando SIGN para cliente {client_id} ({split}) - NON-IID: {non_iid}")
         
         # Dimensões das imagens
         IMG_HEIGHT = 30
         IMG_WIDTH = 30
         
         # Caminho do dataset
-        data_dir = 'data/gtsrb-german-traffic-sign'
+        data_dir = 'data/gtsrb-german-traffic-sign' + f'/{split.capitalize()}/'
         
         # Verificar número de classes
-        num_categories = len(os.listdir(data_dir + '/Train/'))
-        
+        num_categories = len(os.listdir(data_dir))
+
         # Função para carregar imagens
         def load_images(directory):
             images = []
@@ -183,33 +110,31 @@ class DatasetFactory:
             
             return np.array(images), np.array(labels)
         
-        # Carregar dados de treino
-        train_dir = os.path.join(data_dir, 'Train')
-        x_images, y_labels = load_images(train_dir)
-        
-        # Normalizar
+        # Carregar dados
+        x_images, y_labels = load_images(data_dir)
+
+        # Normalizar imagens
         x_images = x_images / 255.0
+
+        if split == "train":
+            # Embaralhar
+            indices = np.arange(x_images.shape[0])
+            np.random.shuffle(indices)
+            x_images = x_images[indices]
+            y_labels = y_labels[indices]
+            
+            # Dividir em treino e teste
+            x_train, x_test, y_train, y_test = train_test_split(
+                x_images, y_labels, test_size=0.3, random_state=42, shuffle=True
+            )
+            
+            # Converter para one-hot encoding
+            y_train = tf.keras.utils.to_categorical(y_train, num_categories)
+            y_test = tf.keras.utils.to_categorical(y_test, num_categories)
         
-        # Embaralhar
-        indices = np.arange(x_images.shape[0])
-        np.random.shuffle(indices)
-        x_images = x_images[indices]
-        y_labels = y_labels[indices]
-        
-        # Dividir em treino e teste
-        x_train, x_test, y_train, y_test = train_test_split(
-            x_images, y_labels, test_size=0.3, random_state=42, shuffle=True
-        )
-        
-        # Converter para one-hot encoding
-        y_train = tf.keras.utils.to_categorical(y_train, num_categories)
-        y_test = tf.keras.utils.to_categorical(y_test, num_categories)
-        
-        # Particionar dados se não for o servidor (client_id > 0)
-        if client_id > 0:
             if non_iid:
-                # Carregar partição não-IID pré-definida
                 try:
+                    # Carregar partição não-IID pré-definida
                     pickle_path = f'data/SIGN/{num_clients}/idx_train_{client_id-1}.pickle'
                     with open(pickle_path, 'rb') as handle:
                         idx_train = pickle.load(handle)
@@ -217,98 +142,30 @@ class DatasetFactory:
                     pickle_path = f'data/SIGN/{num_clients}/idx_test_{client_id-1}.pickle'
                     with open(pickle_path, 'rb') as handle:
                         idx_test = pickle.load(handle)
-                    
-                    x_train = x_train[idx_train]
-                    y_train = y_train[idx_train]
-                    
-                    x_test = x_test[idx_test]
-                    y_test = y_test[idx_test]
                 except Exception as e:
-                    print(f"Erro ao carregar particões não-IID: {e}")
-                    print("Usando particionamento simples como fallback")
-                    # Fallback para particionamento simples
-                    x_train, y_train, x_test, y_test = self._partition_data(
-                        x_train, y_train, x_test, y_test, client_id, num_clients
-                    )
+                    print(f"Erro ao carregar partição não-IID: {e}")
+                    raise e
+                
+                x_train = x_train[idx_train]
+                y_train = y_train[idx_train]
+                
+                x_test = x_test[idx_test]
+                y_test = y_test[idx_test]
+
             else:
                 # Particionamento simples (IID)
                 x_train, y_train, x_test, y_test = self._partition_data(
                     x_train, y_train, x_test, y_test, client_id, num_clients
                 )
         
-        # Simular comportamento malicioso (label flipping para classificação multi-classe)
-        if is_malicious:
-            y_train = self._flip_multiclass_labels(y_train)
-            y_test = self._flip_multiclass_labels(y_test)
-            print(f"Labels invertidos para cliente malicioso {client_id}")
+        elif split == "test":
+            x_train, y_train = None, None
+            x_test = x_images
+            y_test = tf.keras.utils.to_categorical(y_labels, num_categories)
+
         
         return x_train, y_train, x_test, y_test, num_categories
-    
-    def load_cifar10(
-        self, 
-        client_id: int, 
-        num_clients: int, 
-        non_iid: bool = False,
-        is_malicious: bool = False
-    ) -> Tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray, int]:
-        """
-        Carrega o dataset CIFAR10 e particiona para federated learning.
         
-        Args:
-            client_id: ID do cliente (0 para o servidor)
-            num_clients: Número total de clientes
-            non_iid: Se verdadeiro, particiona os dados de forma não-IID
-            is_malicious: Se o cliente é malicioso (para simulação de ataques)
-            
-        Returns:
-            Tupla (x_train, y_train, x_test, y_test, num_classes)
-        """
-        print(f"Carregando CIFAR10 para cliente {client_id}")
-        
-        # Carregar dados CIFAR10
-        (x_train, y_train), (x_test, y_test) = tf.keras.datasets.cifar10.load_data()
-        
-        # Normalizar
-        x_train, x_test = x_train / 255.0, x_test / 255.0
-        
-        # Particionar dados se não for o servidor (client_id > 0)
-        if client_id > 0:
-            if non_iid:
-                # Carregar partição não-IID pré-definida
-                try:
-                    pickle_path = f'data/CIFAR10/{num_clients}/idx_train_{client_id-1}.pickle'
-                    with open(pickle_path, 'rb') as handle:
-                        idx_train = pickle.load(handle)
-                    
-                    pickle_path = f'data/CIFAR10/{num_clients}/idx_test_{client_id-1}.pickle'
-                    with open(pickle_path, 'rb') as handle:
-                        idx_test = pickle.load(handle)
-                    
-                    x_train = x_train[idx_train]
-                    y_train = y_train[idx_train]
-                    
-                    x_test = x_test[idx_test]
-                    y_test = y_test[idx_test]
-                except Exception as e:
-                    print(f"Erro ao carregar particões não-IID: {e}")
-                    print("Usando particionamento simples como fallback")
-                    # Fallback para particionamento simples
-                    x_train, y_train, x_test, y_test = self._partition_data(
-                        x_train, y_train, x_test, y_test, client_id, num_clients
-                    )
-            else:
-                # Particionamento simples (IID)
-                x_train, y_train, x_test, y_test = self._partition_data(
-                    x_train, y_train, x_test, y_test, client_id, num_clients
-                )
-        
-        # Simular comportamento malicioso (label flipping)
-        if is_malicious:
-            y_train = self._flip_labels(y_train)
-            y_test = self._flip_labels(y_test)
-            print(f"Labels invertidos para cliente malicioso {client_id}")
-        
-        return x_train, y_train, x_test, y_test, 10
     
     def _partition_data(
         self, 

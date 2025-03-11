@@ -1,11 +1,9 @@
 import os
 import yaml
-from typing import List, Dict, Any, Tuple
-from fastapi import FastAPI, Request, HTTPException
+from typing import List
+from fastapi import FastAPI, HTTPException
 from pydantic import BaseModel
 import uvicorn
-
-from src.servers.standard_server import FLServer
 
 
 class ModelUpdate(BaseModel):
@@ -15,20 +13,30 @@ class ModelUpdate(BaseModel):
     local_loss: float
     local_accuracy: float
 
+# Carregar configuração
+config_path = os.environ.get('CONFIG_PATH', 'config/default.yaml')
+with open(config_path, 'r') as f:
+    config = yaml.safe_load(f)
+
+server_type = config.get('server', {}).get('type', 'standard')
+
+try:
+    # Importar classe do servidor
+    server_module = __import__(f"src.servers.{server_type}_server", fromlist=['FLServer'])
+    FLServer = server_module.FLServer
+except ImportError:
+    raise ImportError(f"Server type '{server_type}' not found")
+
 # Criar aplicação FastAPI
 app = FastAPI(title="Federated Learning Server")
 
 # Instância do servidor FL
 fl_server = None
 
+
 @app.on_event("startup")
 async def startup_event():
     global fl_server
-    
-    # Carregar configuração
-    config_path = os.environ.get('CONFIG_PATH', 'config/default.yaml')
-    with open(config_path, 'r') as f:
-        config = yaml.safe_load(f)
     
     # Inicializar servidor
     fl_server = FLServer(config)
@@ -100,5 +108,8 @@ async def get_status():
     }
 
 if __name__ == "__main__":
+    # Obter endereço e porta do servidor
+    host, port = config['server']['address'].split(":")
+
     # Executar servidor diretamente
-    uvicorn.run("main_server:app", host="0.0.0.0", port=8000, reload=False)
+    uvicorn.run("run_server:app", host=host, port=int(port), reload=False)

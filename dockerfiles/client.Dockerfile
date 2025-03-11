@@ -1,4 +1,4 @@
-FROM python:3.9-slim
+FROM python:3.10-slim
 
 WORKDIR /app
 
@@ -35,9 +35,6 @@ COPY . .
 
 # Configurações de ambiente
 ENV PYTHONPATH=/app
-ENV CONFIG_PATH=/app/config/default.yaml
-ENV CLIENT_ID=1
-ENV SERVER_URL=http://0.0.0.0:8000
 
 # Executar o cliente
-CMD ["python", "main_client.py"]
+CMD ["python", "run_client.py"]
