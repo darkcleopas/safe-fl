@@ -1,9 +1,30 @@
+x-client-env: &client-env
+  SERVER_URL: http://server:8000
+  CUDA_VISIBLE_DEVICES: -1
+  CONFIG_PATH: config/default.yaml
+  CLIENT_TYPE: standard
+
+x-client-base: &client-base
+  build:
+    dockerfile: dockerfiles/client.Dockerfile
+  depends_on:
+    server:
+      condition: service_healthy
+  networks:
+    - fl_network
+  deploy:
+    resources:
+      limits:
+        cpus: 2.0
+        memory: 3G
+
 services:
   server:
     build:
       dockerfile: dockerfiles/server.Dockerfile
     environment:
       - CUDA_VISIBLE_DEVICES=-1
+      - CONFIG_PATH=config/default.yaml
     ports:
       - "8000:8000"
     volumes:
@@ -19,29 +40,39 @@ services:
     deploy:
       resources:
         limits:
-          cpus: 1.0
-          memory: 4g
-
-  # Clientes serão gerados dinamicamente pelo script run_experiment.sh
-  # Exemplo de cliente
-  client1:
-    build:
-      dockerfile: dockerfiles/client.Dockerfile
-    depends_on:
-      server:
-        condition: service_healthy
+          cpus: 2.0
+          memory: 3G
+          
+  client_1:
+    <<: *client-base
     environment:
-      - CLIENT_ID=1
-      - SERVER_URL=http://server:8000
-      - CUDA_VISIBLE_DEVICES=-1
-    networks:
-      - fl_network
-    deploy:
-      resources:
-        limits:
-          cpus: 10.0
-          memory: 3g
-
+      <<: *client-env
+      CLIENT_ID: 1
+      
+  client_2:
+    <<: *client-base
+    environment:
+      <<: *client-env
+      CLIENT_ID: 2
+      
+  client_3:
+    <<: *client-base
+    environment:
+      <<: *client-env
+      CLIENT_ID: 3
+      
+  client_4:
+    <<: *client-base
+    environment:
+      <<: *client-env
+      CLIENT_ID: 4
+      
+  client_5:
+    <<: *client-base
+    environment:
+      <<: *client-env
+      CLIENT_ID: 5
+      
 networks:
   fl_network:
     driver: bridge

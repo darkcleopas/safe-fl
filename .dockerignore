@@ -1,0 +1,43 @@
+# Ambientes virtuais
+.venv/
+venv/
+env/
+
+# Caches Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.pytest_cache/
+
+# Arquivos de controle de versão
+.git/
+.gitignore
+
+# Arquivos Docker (para evitar cópias recursivas)
+Dockerfile
+docker-compose.yaml
+dockerfiles/
+
+# Resultados e dados que podem ser grandes
+results/
+# Se precisar incluir dados específicos no contêiner, você pode ser mais seletivo:
+# data/*
+# !data/necessário.csv
+
+# Diretórios e arquivos de configuração de desenvolvimento
+.idea/
+.vscode/
+*.swp
+*.swo
+
+# Logs
+*.log
+
+# Arquivos temporários
+tmp/
+temp/
+
+# Arquivos de documentação
+README.md
+LICENSE
