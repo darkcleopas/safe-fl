@@ -32,6 +32,11 @@ class FLServer:
         self.server_config = config['server']
         self.dataset_config = config['dataset']
         self.clients_config = config['clients']
+
+        # Gerenciamento de clientes para controle de recursos
+        self.max_concurrent_clients = config.get('server', {}).get('max_concurrent_clients', 2)
+        self.client_queue = []
+        self.active_clients = []
         
         # Definir seed para reprodutibilidade
         self.seed = self.experiment_config.get('seed', 42)
@@ -294,12 +299,24 @@ class FLServer:
         
         # Selecionar clientes para esta rodada
         available_clients = list(range(1, self.clients_config['num_clients'] + 1))
-        self.selected_clients = self.select_clients(self.current_round, available_clients)
+        all_selected_clients = self.select_clients(self.current_round, available_clients)
+        
+        # Inicializar a fila de clientes e clientes ativos
+        self.client_queue = all_selected_clients.copy()
+        self.active_clients = []
+        
+        # Ativar o primeiro lote de clientes
+        active_count = min(self.max_concurrent_clients, len(self.client_queue))
+        self.active_clients = self.client_queue[:active_count]
+        self.client_queue = self.client_queue[active_count:]
+        
+        self.selected_clients = all_selected_clients  # Mantém todos os selecionados
         
         return {
             'round': self.current_round,
             'total_rounds': self.total_rounds,
-            'selected_clients': self.selected_clients
+            'selected_clients': self.selected_clients,
+            'active_clients': self.active_clients
         }
     
     def submit_update(
@@ -334,6 +351,16 @@ class FLServer:
         
         # Armazenar atualização
         self.round_updates[client_id] = (model_weights, num_examples)
+
+        # Remover dos clientes ativos
+        if client_id in self.active_clients:
+            self.active_clients.remove(client_id)
+            
+            # Ativar próximo cliente se disponível
+            if self.client_queue:
+                next_client = self.client_queue.pop(0)
+                self.active_clients.append(next_client)
+                self.logger.info(f"Ativando próximo cliente: {next_client}")
 
         if client_id not in self.metrics['local_losses'] and client_id not in self.metrics['local_accuracies']:
             self.metrics['local_losses'][client_id] = []

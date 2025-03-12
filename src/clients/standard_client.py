@@ -208,32 +208,40 @@ class FLClient:
             Tupla (is_selected, training_complete)
         """
         try:
+            # Verificar status geral da rodada
             response = requests.get(f"{self.server_url}/round")
             
             if response.status_code != 200:
                 self.logger.error(f"Erro ao verificar rodada: {response.status_code}")
-                return False, False
+                return False, False, False, False
             
             data = response.json()
             self.current_round = data['round']
-            
-            # Verficar se o cliente já enviou a atualização
-            is_round_complete_for_client = self.client_id in data['updates_received']
-
-            # Verificar se este cliente foi selecionado
-            is_selected = self.client_id in data['selected_clients']
-
-            # Verificar se o treinamento está completo
             training_complete = data['training_complete']
             
-            if is_selected and not is_round_complete_for_client:
-                self.logger.info(f"Cliente selecionado para a rodada {self.current_round}")
+            # Verificar status específico deste cliente
+            client_response = requests.get(f"{self.server_url}/client_status/{self.client_id}")
             
-            return is_selected, training_complete, is_round_complete_for_client
+            if client_response.status_code != 200:
+                self.logger.error(f"Erro ao verificar status do cliente: {client_response.status_code}")
+                return False, False, False, False
             
+            client_data = client_response.json()
+            
+            is_selected = client_data['is_selected']
+            is_active = client_data['is_active']
+            is_completed = client_data['is_completed']
+            
+            if is_selected and is_active and not is_completed:
+                self.logger.info(f"Cliente ativo para a rodada {self.current_round}")
+            elif is_selected and not is_active and not is_completed:
+                self.logger.info(f"Cliente selecionado mas aguardando ativação para a rodada {self.current_round}")
+            
+            return is_selected, training_complete, is_completed, is_active
+                
         except Exception as e:
             self.logger.error(f"Erro ao verificar rodada: {str(e)}")
-            return False, False
+            return False, False, False, False
     
     def train_model(self) -> Tuple[List[np.ndarray], int]:
         """
@@ -355,14 +363,12 @@ class FLClient:
                 return
             
             while True:
-                # Verificar status da rodada
-                is_selected, training_complete, is_round_complete_for_client = self.check_round()
+                # Verificar status da rodada e se o cliente está ativo
+                is_selected, training_complete, is_round_complete_for_client, is_active = self.check_round()
                 
                 if training_complete:
                     self.logger.info("Treinamento federado concluído")
-                    # Buscar o modelo final
                     self.fetch_model()
-                    # Avaliar o modelo final
                     metrics = self.evaluate_model()
                     self.logger.info(f"Métricas finais: {json.dumps(metrics)}")
                     break
@@ -372,7 +378,13 @@ class FLClient:
                     time.sleep(10)
                     continue
                 
-                if is_selected:
+                # Se selecionado mas não ativo, aguardar na fila
+                if is_selected and not is_active:
+                    self.logger.info("Cliente aguardando na fila. Verificando novamente em breve...")
+                    time.sleep(5)  # Verificar com mais frequência quando está na fila
+                    continue
+                
+                if is_selected and is_active:
                     # Buscar o modelo atual
                     if not self.fetch_model():
                         self.logger.error("Falha ao buscar o modelo. Tentando novamente...")
@@ -389,7 +401,7 @@ class FLClient:
                         continue
                 
                 # Aguardar antes da próxima verificação
-                time.sleep(3)
+                time.sleep(10)
                 
         except KeyboardInterrupt:
             self.logger.info("Treinamento interrompido pelo usuário")

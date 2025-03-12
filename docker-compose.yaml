@@ -6,7 +6,10 @@ x-client-env: &client-env
 
 x-client-base: &client-base
   build:
+    context: .
     dockerfile: dockerfiles/client.Dockerfile
+  volumes:
+    - ./:/app
   depends_on:
     server:
       condition: service_healthy
@@ -15,12 +18,13 @@ x-client-base: &client-base
   deploy:
     resources:
       limits:
-        cpus: 2.0
+        cpus: 4.0
         memory: 3G
 
 services:
   server:
     build:
+      context: .
       dockerfile: dockerfiles/server.Dockerfile
     environment:
       - CUDA_VISIBLE_DEVICES=-1
@@ -28,15 +32,15 @@ services:
     ports:
       - "8000:8000"
     volumes:
-      - ./results:/app/results
+      - ./:/app
     networks:
       - fl_network
     healthcheck:
       test: ["CMD", "curl", "-f", "http://localhost:8000/status"]
-      interval: 30s
+      interval: 15s
       timeout: 10s
       retries: 3
-      start_period: 15s
+      start_period: 10s
     deploy:
       resources:
         limits:
@@ -60,18 +64,21 @@ services:
     environment:
       <<: *client-env
       CLIENT_ID: 3
+    command: ["sh", "-c", "sleep 10 && python run_client.py"]
       
   client_4:
     <<: *client-base
     environment:
       <<: *client-env
       CLIENT_ID: 4
+    command: ["sh", "-c", "sleep 10 && python run_client.py"]
       
   client_5:
     <<: *client-base
     environment:
       <<: *client-env
       CLIENT_ID: 5
+    command: ["sh", "-c", "sleep 20 && python run_client.py"]
       
 networks:
   fl_network:

@@ -107,6 +107,25 @@ async def get_status():
         }
     }
 
+@app.get("/client_status/{client_id}")
+async def get_client_status(client_id: int):
+    """Retorna se o cliente está ativo para treinamento."""
+    if fl_server is None:
+        raise HTTPException(status_code=500, detail="Server not initialized")
+    
+    is_selected = client_id in fl_server.selected_clients
+    is_active = client_id in fl_server.active_clients
+    is_completed = client_id in fl_server.round_updates
+    
+    return {
+        "round": fl_server.current_round,
+        "is_selected": is_selected,
+        "is_active": is_active,
+        "is_completed": is_completed,
+        "should_train": is_selected and is_active and not is_completed
+    }
+
+
 if __name__ == "__main__":
     # Obter endereço e porta do servidor
     host, port = config['server']['address'].split(":")
