@@ -36,6 +36,9 @@ class FLMetricsVisualizer:
         self.local_losses = self.metrics.get('local_losses', {})
         self.local_accuracies = self.metrics.get('local_accuracies', {})
         
+        # Extrair dados de exemplos por cliente
+        self.client_examples = self.metrics.get('client_examples', {})
+        
         # Identificar todos os clientes
         self.all_clients = set()
         for clients in self.selected_clients:
@@ -136,44 +139,108 @@ class FLMetricsVisualizer:
         # Preparar dados para o gráfico de barras empilhadas
         contribution_data = {}
         
-        for round_idx, clients in enumerate(self.selected_clients):
-            round_num = self.rounds[round_idx]
+        # Para cada rodada, coletamos os dados de contribuição de cada cliente
+        for round_idx, round_num in enumerate(self.rounds):
             contribution_data[round_num] = {}
             
-            # Inicializar todas as contribuições como 0
+            # Inicializar contribuições como 0 para todos os clientes
             for client in self.all_clients:
                 contribution_data[round_num][client] = 0
             
-            # Calcular contribuição de exemplos por cliente
-            # Aqui, vamos simplificar assumindo que todos os clientes contribuem igualmente
-            # em uma rodada (já que não temos o número exato de exemplos por cliente)
-            for client in clients:
-                contribution_data[round_num][client] = 1  # Pode ser ajustado com dados reais
+            # Encontrar quais clientes participaram desta rodada
+            if round_idx < len(self.selected_clients):
+                for client in self.selected_clients[round_idx]:
+                    # Se temos dados de exemplos específicos para este cliente
+                    client_str = str(client)
+                    if client_str in self.client_examples:
+                        # Verificar se temos dados para esta rodada específica
+                        examples_list = self.client_examples[client_str]
+                        if round_idx < len(examples_list):
+                            contribution_data[round_num][client] = examples_list[round_idx]
+                        else:
+                            # Fallback: usar o primeiro valor disponível (ou outro método)
+                            if examples_list:
+                                contribution_data[round_num][client] = examples_list[0]
         
         # Converter para DataFrame
         contribution_df = pd.DataFrame(contribution_data).T
         
-        # Normalizar para porcentagens
-        contribution_df = contribution_df.div(contribution_df.sum(axis=1), axis=0) * 100
+        # Criar figura
+        fig, (ax1, ax2) = plt.subplots(2, 1, figsize=(12, 10))
         
-        fig, ax = plt.subplots(figsize=(12, 6))
-        
-        # Criar barras empilhadas
+        # 1. Gráfico de contribuições absolutas
         bottom = np.zeros(len(contribution_df))
         for client in contribution_df.columns:
             values = contribution_df[client].values
-            ax.bar(contribution_df.index, values, bottom=bottom, label=f'Cliente {client}')
+            ax1.bar(contribution_df.index, values, bottom=bottom, label=f'Cliente {client}')
             bottom += values
         
-        ax.set_xlabel('Rodada')
-        ax.set_ylabel('Porcentagem de Contribuição (%)')
-        ax.set_title('Distribuição de Contribuições dos Clientes por Rodada')
-        ax.legend(title='Cliente', bbox_to_anchor=(1.05, 1), loc='upper left')
+        ax1.set_title('Número de Exemplos Contribuídos por Cliente em Cada Rodada')
+        ax1.set_ylabel('Número de Exemplos')
+        ax1.legend(title='Cliente', bbox_to_anchor=(1.05, 1), loc='upper left')
+        ax1.grid(True, linestyle='--', alpha=0.3)
+        
+        # 2. Gráfico de contribuições percentuais
+        # Normalizar para porcentagens
+        pct_df = contribution_df.div(contribution_df.sum(axis=1), axis=0) * 100
+        
+        bottom = np.zeros(len(pct_df))
+        for client in pct_df.columns:
+            values = pct_df[client].values
+            ax2.bar(pct_df.index, values, bottom=bottom, label=f'Cliente {client}')
+            bottom += values
+        
+        ax2.set_xlabel('Rodada')
+        ax2.set_ylabel('Porcentagem de Contribuição (%)')
+        ax2.set_title('Distribuição Percentual de Contribuições dos Clientes por Rodada')
+        ax2.grid(True, linestyle='--', alpha=0.3)
         
         plt.tight_layout()
         
         if save_fig:
             plt.savefig(os.path.join(self.output_dir, 'client_contributions.png'), dpi=300, bbox_inches='tight')
+        
+        return fig
+    
+    def plot_examples_over_time(self, save_fig: bool = True) -> plt.Figure:
+        """
+        Cria um gráfico mostrando o número de exemplos contribuídos por cada cliente ao longo do tempo.
+        
+        Args:
+            save_fig: Se True, salva a figura no diretório de saída
+        
+        Returns:
+            Objeto Figure do matplotlib
+        """
+        fig, ax = plt.subplots(figsize=(12, 7))
+        
+        # Plot para cada cliente
+        for client_id, examples in self.client_examples.items():
+            # Encontrar em quais rodadas este cliente participou
+            participated_rounds = []
+            for i, clients in enumerate(self.selected_clients):
+                if int(client_id) in clients:
+                    participated_rounds.append(self.rounds[i])
+            
+            # Verificar se temos o mesmo número de rodadas e exemplos
+            if len(participated_rounds) == len(examples):
+                ax.plot(participated_rounds, examples, 'o-', label=f'Cliente {client_id}')
+            else:
+                # Se não tivermos uma correspondência exata, assumimos que os exemplos estão em ordem
+                rounds_to_plot = self.rounds[:len(examples)]
+                if rounds_to_plot:
+                    ax.plot(rounds_to_plot, examples, 'o-', label=f'Cliente {client_id}')
+        
+        ax.set_xlabel('Rodada')
+        ax.set_ylabel('Número de Exemplos')
+        ax.set_title('Evolução do Número de Exemplos por Cliente')
+        ax.grid(True, linestyle='--', alpha=0.7)
+        ax.legend(loc='best')
+        
+        plt.tight_layout()
+        
+        if save_fig:
+            plt.savefig(os.path.join(self.output_dir, 'examples_over_time.png'), dpi=300, bbox_inches='tight')
         
         return fig
     
@@ -281,10 +348,6 @@ class FLMetricsVisualizer:
         Returns:
             Objeto Figure do matplotlib
         """
-        # Aqui podemos implementar métricas específicas de segurança, como:
-        # - Desvio padrão das acurácias locais por rodada (alta variância pode indicar ataques)
-        # - Taxa de melhoria global vs. contribuições locais
-        
         # Calcular desvio padrão das acurácias locais por rodada
         std_devs = []
         rounds_with_data = []
@@ -322,6 +385,74 @@ class FLMetricsVisualizer:
         
         return fig
     
+    def plot_examples_vs_performance(self, save_fig: bool = True) -> plt.Figure:
+        """
+        Cria um gráfico de dispersão comparando o número de exemplos com a acurácia por cliente.
+        
+        Args:
+            save_fig: Se True, salva a figura no diretório de saída
+        
+        Returns:
+            Objeto Figure do matplotlib
+        """
+        # Preparar dados para o gráfico
+        plot_data = []
+        
+        for client_id in self.client_examples.keys():
+            examples = self.client_examples[client_id]
+            accuracies = self.local_accuracies.get(client_id, [])
+            
+            # Para cada rodada onde temos tanto exemplos quanto acurácia
+            for i in range(min(len(examples), len(accuracies))):
+                plot_data.append({
+                    'Cliente': f'Cliente {client_id}',
+                    'Exemplos': examples[i],
+                    'Acurácia': accuracies[i],
+                    'Rodada': i + 1 if i < len(self.rounds) else i
+                })
+        
+        # Converter para DataFrame
+        if not plot_data:
+            print("Dados insuficientes para o gráfico de exemplos vs performance")
+            return None
+            
+        df = pd.DataFrame(plot_data)
+        
+        # Criar figura
+        fig, ax = plt.subplots(figsize=(12, 8))
+        
+        # Usar seaborn para criar um scatterplot avançado
+        scatter = sns.scatterplot(
+            data=df,
+            x='Exemplos',
+            y='Acurácia',
+            hue='Cliente',
+            size='Rodada',
+            sizes=(20, 200),
+            alpha=0.7,
+            ax=ax
+        )
+        
+        # Adicionar rótulos
+        for i, row in df.iterrows():
+            ax.text(row['Exemplos'] + 0.1, row['Acurácia'], f"R{row['Rodada']}", 
+                   fontsize=9, alpha=0.7)
+        
+        ax.set_title('Relação entre Número de Exemplos e Acurácia por Cliente')
+        ax.set_xlabel('Número de Exemplos de Treinamento')
+        ax.set_ylabel('Acurácia Local')
+        ax.grid(True, linestyle='--', alpha=0.3)
+        
+        # Ajustar legenda
+        plt.legend(bbox_to_anchor=(1.05, 1), loc='upper left')
+        
+        plt.tight_layout()
+        
+        if save_fig:
+            plt.savefig(os.path.join(self.output_dir, 'examples_vs_performance.png'), dpi=300, bbox_inches='tight')
+        
+        return fig
+    
     def generate_all_visualizations(self):
         """
         Gera e salva todas as visualizações disponíveis.
@@ -336,6 +467,12 @@ class FLMetricsVisualizer:
         
         self.plot_client_contributions()
         print("✓ Gráfico de contribuições dos clientes gerado")
+        
+        self.plot_examples_over_time()
+        print("✓ Gráfico de evolução do número de exemplos por cliente gerado")
+        
+        self.plot_examples_vs_performance()
+        print("✓ Gráfico de relação entre exemplos e performance gerado")
         
         self.plot_local_vs_global_divergence()
         print("✓ Gráfico de divergência local vs. global gerado")
@@ -381,5 +518,5 @@ def main():
     visualizer.generate_all_visualizations()
 
 
-# if __name__ == "__main__":
-main()
+if __name__ == "__main__":
+    main()

@@ -70,7 +70,8 @@ class FLServer:
             'selected_clients': [],
             'num_examples': [],
             'local_losses': {},
-            'local_accuracies': {}
+            'local_accuracies': {},
+            'client_examples': {}
         }
         
         # Estado da simulação
@@ -369,6 +370,7 @@ class FLServer:
 
         self.metrics['local_losses'][client_id].append(local_loss)
         self.metrics['local_accuracies'][client_id].append(local_accuracy)
+        self.metrics['client_examples'][client_id].append(num_examples) 
 
         self.logger.info(f"Atualização recebida do cliente {client_id} com {num_examples} exemplos")
         
