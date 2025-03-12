@@ -364,9 +364,10 @@ class FLServer:
                 self.active_clients.append(next_client)
                 self.logger.info(f"Ativando próximo cliente: {next_client}")
 
-        if client_id not in self.metrics['local_losses'] and client_id not in self.metrics['local_accuracies']:
+        if client_id not in self.metrics['local_losses'] and client_id not in self.metrics['local_accuracies'] and client_id not in self.metrics['client_examples']:
             self.metrics['local_losses'][client_id] = []
             self.metrics['local_accuracies'][client_id] = []
+            self.metrics['client_examples'][client_id] = []
 
         self.metrics['local_losses'][client_id].append(local_loss)
         self.metrics['local_accuracies'][client_id].append(local_accuracy)
