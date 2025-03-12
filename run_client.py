@@ -1,10 +1,17 @@
 import os
 import yaml
 import logging
+import tensorflow as tf
 
 
 logging.getLogger("tensorflow").setLevel(logging.ERROR)
 os.environ["TF_CPP_MIN_LOG_LEVEL"] = "1"
+os.environ["CUDA_VISIBLE_DEVICES"] = "-1"
+
+# Limitar threads do TensorFlow
+tf_num_threads = int(os.environ.get('TF_NUM_THREADS', '1'))
+tf.config.threading.set_intra_op_parallelism_threads(tf_num_threads)
+tf.config.threading.set_inter_op_parallelism_threads(tf_num_threads)
 
 
 if __name__ == "__main__":

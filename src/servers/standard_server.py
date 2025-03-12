@@ -8,6 +8,7 @@ import tensorflow as tf
 from typing import List, Dict, Any, Tuple
 import base64
 import io
+import gc
 
 from src.utils.model_factory import ModelFactory
 from src.utils.dataset_factory import DatasetFactory
@@ -379,6 +380,9 @@ class FLServer:
             updates = [(self.round_updates[client_id][0], self.round_updates[client_id][1]) 
                        for client_id in self.selected_clients]
             self.aggregate_models(updates)
+
+            # Limpar a memória após a agregação
+            gc.collect()
             
             # Avaliar modelo se necessário
             if self.current_round % self.server_config['evaluation_interval'] == 0:

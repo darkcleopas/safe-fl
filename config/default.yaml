@@ -28,7 +28,7 @@ server:
   selection_strategy: "random"  # Estratégia de seleção de clientes
   selection_fraction: 1.0  # Fração de clientes selecionados por round
   evaluation_interval: 1  # Intervalo de avaliação do modelo global (em rounds)
-  max_concurrent_clients: 2  # Número máximo de clientes treinando simultaneamente
+  max_concurrent_clients: 1  # Número máximo de clientes treinando simultaneamente
 
 # Configurações dos clientes
 clients:

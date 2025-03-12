@@ -7,6 +7,8 @@ import base64
 import io
 import json
 from typing import Dict, Any, Tuple, List, Optional
+import gc
+import os
 
 from src.utils.model_factory import ModelFactory
 from src.utils.dataset_factory import DatasetFactory
@@ -49,8 +51,8 @@ class FLClient:
         # Configurar logging
         self.setup_logging()
         
-        # # Configurar recurso computacional
-        # self.setup_resource()
+        # Configurar recurso computacional
+        self.setup_resource()
         
         # Carregar dados
         self.load_data()
@@ -73,17 +75,16 @@ class FLClient:
         )
         self.logger = logging.getLogger(f"FLClient-{self.client_id}")
     
-    # def setup_resource(self):
-    #     """Define os recursos computacionais do cliente (simulado)."""
-    #     # Simular capacidades de computação variáveis
-    #     min_capability = self.clients_config['resource_constraints']['min_computation_capability']
-    #     max_capability = self.clients_config['resource_constraints']['max_computation_capability']
+    def setup_resource(self):
+        """Define os recursos computacionais do cliente."""        
+        # Limitar número de threads
+        tf_num_threads = int(os.environ.get('TF_NUM_THREADS', '1'))
         
-    #     # Usar o seed e o ID do cliente para garantir recursos consistentes
-    #     np.random.seed(self.seed + self.client_id)
-    #     self.computation_capability = np.random.uniform(min_capability, max_capability)
+        # Limitar threads
+        tf.config.threading.set_intra_op_parallelism_threads(tf_num_threads)
+        tf.config.threading.set_inter_op_parallelism_threads(tf_num_threads)
         
-    #     self.logger.info(f"Capacidade computacional: {self.computation_capability:.2f} GHz")
+        self.logger.info(f"TensorFlow configurado com {tf_num_threads} threads")
     
     def load_data(self):
         """Carrega os dados do cliente."""
@@ -278,7 +279,13 @@ class FLClient:
         final_accuracy = history.history['accuracy'][-1]
         self.logger.info(f"Treinamento concluído. Loss: {final_loss:.4f}, Accuracy: {final_accuracy:.4f}")
         
-        return self.model.get_weights(), self.num_examples, final_loss, final_accuracy
+        # Guardar os pesos antes de limpar a sessão
+        weights = self.model.get_weights().copy()
+        
+        # Rodar coleta de lixo para liberar memória
+        gc.collect()
+        
+        return weights, self.num_examples, final_loss, final_accuracy
     
     def evaluate_model(self) -> Dict[str, float]:
         """
@@ -371,6 +378,8 @@ class FLClient:
                     self.fetch_model()
                     metrics = self.evaluate_model()
                     self.logger.info(f"Métricas finais: {json.dumps(metrics)}")
+                    tf.keras.backend.clear_session()
+                    gc.collect()
                     break
 
                 if is_round_complete_for_client:
@@ -399,7 +408,11 @@ class FLClient:
                         self.logger.error("Falha ao enviar atualização. Tentando novamente...")
                         time.sleep(5)
                         continue
-                
+                    
+                    # Limpar recursos
+                    tf.keras.backend.clear_session()
+                    gc.collect()
+
                 # Aguardar antes da próxima verificação
                 time.sleep(10)
                 
@@ -407,3 +420,7 @@ class FLClient:
             self.logger.info("Treinamento interrompido pelo usuário")
         except Exception as e:
             self.logger.error(f"Erro no loop de treinamento: {str(e)}")
+        
+        # Limpar recursos
+        tf.keras.backend.clear_session()
+        gc.collect()

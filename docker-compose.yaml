@@ -3,6 +3,8 @@ x-client-env: &client-env
   CUDA_VISIBLE_DEVICES: -1
   CONFIG_PATH: config/default.yaml
   CLIENT_TYPE: standard
+  TF_NUM_THREADS: 4
+  TF_CPP_MIN_LOG_LEVEL: 1
 
 x-client-base: &client-base
   build:
@@ -19,7 +21,7 @@ x-client-base: &client-base
     resources:
       limits:
         cpus: 4.0
-        memory: 3G
+        memory: 2G
 
 services:
   server:
@@ -46,6 +48,9 @@ services:
         limits:
           cpus: 2.0
           memory: 3G
+        reservations:
+          cpus: 1.0
+          memory: 3G
           
   client_1:
     <<: *client-base
@@ -58,27 +63,28 @@ services:
     environment:
       <<: *client-env
       CLIENT_ID: 2
+    command: ["sh", "-c", "sleep 10 && python run_client.py"]
       
   client_3:
     <<: *client-base
     environment:
       <<: *client-env
       CLIENT_ID: 3
-    command: ["sh", "-c", "sleep 10 && python run_client.py"]
+    command: ["sh", "-c", "sleep 20 && python run_client.py"]
       
   client_4:
     <<: *client-base
     environment:
       <<: *client-env
       CLIENT_ID: 4
-    command: ["sh", "-c", "sleep 10 && python run_client.py"]
+    command: ["sh", "-c", "sleep 30 && python run_client.py"]
       
   client_5:
     <<: *client-base
     environment:
       <<: *client-env
       CLIENT_ID: 5
-    command: ["sh", "-c", "sleep 20 && python run_client.py"]
+    command: ["sh", "-c", "sleep 40 && python run_client.py"]
       
 networks:
   fl_network:
