@@ -38,8 +38,8 @@ class FLClient(FLClient):
         # Determinar o número de classes do conjunto de dados
         num_classes = self.y_train.shape[1]
         
-        # Inverter uma porcentagem dos rótulos (50%)
-        indices_to_flip = np.random.choice(len(self.y_train), size=int(len(self.y_train) * 0.5), replace=False)
+        # Inverter uma porcentagem dos rótulos (100%)
+        indices_to_flip = np.random.choice(len(self.y_train), size=int(len(self.y_train)), replace=False)
         
         # Para cada índice selecionado, trocar o rótulo
         for idx in indices_to_flip:
