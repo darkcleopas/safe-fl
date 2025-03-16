@@ -4,13 +4,6 @@
 # Federated Learning Runner Script (Scalable)
 # ===========================================
 
-# Default configuration
-NUM_CLIENTS=5            # Default number of clients
-DELAY_BETWEEN=10         # Default delay between clients (seconds)
-SERVER_STARTUP_TIME=15   # Time to wait for server initialization (seconds)
-CONFIG_PATH="config/default.yaml"
-SERVER_PORT=8000
-
 # Define colors for better visibility
 GREEN='\033[0;32m'
 BLUE='\033[0;34m'
@@ -21,8 +14,8 @@ NC='\033[0m' # No Color
 # Parse command line arguments
 while [[ $# -gt 0 ]]; do
   case $1 in
-    --clients)
-      NUM_CLIENTS="$2"
+    --config)
+      CONFIG_PATH="$2"
       shift 2
       ;;
     --delay)
@@ -33,10 +26,6 @@ while [[ $# -gt 0 ]]; do
       SERVER_STARTUP_TIME="$2"
       shift 2
       ;;
-    --config)
-      CONFIG_PATH="$2"
-      shift 2
-      ;;
     --port)
       SERVER_PORT="$2"
       shift 2
@@ -45,11 +34,10 @@ while [[ $# -gt 0 ]]; do
       echo "Usage: $0 [options]"
       echo ""
       echo "Options:"
-      echo "  --clients N        Number of clients to run (default: 5)"
+      echo "  --config PATH      Path to config file (default: config/default.yaml)"
       echo "  --delay N          Delay between client startups in seconds (default: 10)"
       echo "  --server-wait N    Time to wait for server initialization in seconds (default: 15)"
-      echo "  --config PATH      Path to config file (default: config/default.yaml)"
-      echo "  --port N           Server port (default: 8000)"
+      echo "  --port N           Server port (override config value)"
       echo "  --help             Show this help message"
       exit 0
       ;;
@@ -61,16 +49,10 @@ while [[ $# -gt 0 ]]; do
   esac
 done
 
-# Configuration from docker-compose.yaml
-SERVER_URL="http://localhost:$SERVER_PORT"
-CUDA_VISIBLE_DEVICES="-1"
-CLIENT_TYPE="standard"
-TF_NUM_THREADS="4"
-TF_CPP_MIN_LOG_LEVEL="1"
-
 # Directory where the script is located
 DIR="$( cd "$( dirname "${BASH_SOURCE[0]}" )" && pwd )"
 VENV_PATH="$DIR/.venv"
+PARSER_SCRIPT="$DIR/parse_yaml_config.py"
 
 # Verify that the virtual environment exists
 if [ ! -d "$VENV_PATH" ]; then
@@ -83,6 +65,53 @@ fi
 if [ ! -f "$DIR/$CONFIG_PATH" ]; then
     echo -e "${RED}Error: Config file not found at $CONFIG_PATH${NC}"
     exit 1
+fi
+
+# Create parser script if it doesn't exist
+if [ ! -f "$PARSER_SCRIPT" ]; then
+    echo -e "${YELLOW}Creating YAML parser script...${NC}"
+    cp "$DIR/parse_yaml_config.py" "$PARSER_SCRIPT"
+    chmod +x "$PARSER_SCRIPT"
+fi
+
+# Extract configuration using the Python parser
+echo -e "${BLUE}Extraindo configuração de $CONFIG_PATH...${NC}"
+CONFIG_JSON=$(python "$PARSER_SCRIPT" "$DIR/$CONFIG_PATH")
+if [ $? -ne 0 ]; then
+    echo -e "${RED}Erro: Falha ao analisar o arquivo de configuração${NC}"
+    exit 1
+fi
+
+# Verificar se o resultado é um JSON válido
+if ! echo "$CONFIG_JSON" | python -c "import sys, json; json.load(sys.stdin)" &> /dev/null; then
+    echo -e "${RED}Erro: A saída do parser não é um JSON válido:${NC}"
+    echo "$CONFIG_JSON"
+    exit 1
+fi
+
+# Extract values from the JSON output
+NUM_CLIENTS=$(echo "$CONFIG_JSON" | python -c "import sys, json; print(json.load(sys.stdin)['num_clients'])")
+CONFIG_SERVER_HOST=$(echo "$CONFIG_JSON" | python -c "import sys, json; print(json.load(sys.stdin)['server_host'])")
+CONFIG_SERVER_PORT=$(echo "$CONFIG_JSON" | python -c "import sys, json; print(json.load(sys.stdin)['server_port'])")
+EXPERIMENT_NAME=$(echo "$CONFIG_JSON" | python -c "import sys, json; print(json.load(sys.stdin)['experiment_name'])")
+TOTAL_ROUNDS=$(echo "$CONFIG_JSON" | python -c "import sys, json; print(json.load(sys.stdin)['rounds'])")
+SEED=$(echo "$CONFIG_JSON" | python -c "import sys, json; print(json.load(sys.stdin)['seed'])")
+DATASET=$(echo "$CONFIG_JSON" | python -c "import sys, json; print(json.load(sys.stdin)['dataset'])")
+MODEL=$(echo "$CONFIG_JSON" | python -c "import sys, json; print(json.load(sys.stdin)['model'])")
+HONEST_CLIENT_TYPE=$(echo "$CONFIG_JSON" | python -c "import sys, json; print(json.load(sys.stdin)['honest_client_type'])")
+MALICIOUS_PERCENTAGE=$(echo "$CONFIG_JSON" | python -c "import sys, json; print(json.load(sys.stdin)['malicious_percentage'])")
+MALICIOUS_CLIENT_TYPE=$(echo "$CONFIG_JSON" | python -c "import sys, json; print(json.load(sys.stdin)['malicious_client_type'])")
+
+# Calcular o número de clientes maliciosos
+NUM_MALICIOUS=$(python -c "import math; print(math.floor($NUM_CLIENTS * $MALICIOUS_PERCENTAGE))")
+NUM_HONEST=$(($NUM_CLIENTS - $NUM_MALICIOUS))
+
+# Gerar lista de clientes maliciosos aleatoriamente
+if [ $NUM_MALICIOUS -gt 0 ]; then
+    MALICIOUS_CLIENTS=$(python -c "import random; random.seed($SEED); print(','.join(map(str, sorted(random.sample(range(1, $NUM_CLIENTS + 1), $NUM_MALICIOUS)))))")
+    echo -e "${YELLOW}Clientes maliciosos selecionados: $MALICIOUS_CLIENTS${NC}"
+else
+    MALICIOUS_CLIENTS=""
 fi
 
 # Detect terminal emulator for Linux
@@ -106,6 +135,14 @@ else
     echo -e "${RED}Unsupported OS. Please run the commands manually.${NC}"
     exit 1
 fi
+
+# Configuração de ambiente básica
+SERVER_URL="http://$CONFIG_SERVER_HOST:$CONFIG_SERVER_PORT"
+DELAY_BETWEEN=10         # Default delay between clients (seconds)
+SERVER_STARTUP_TIME=15   # Time to wait for server initialization (seconds)
+CUDA_VISIBLE_DEVICES="-1"
+TF_NUM_THREADS="4"
+TF_CPP_MIN_LOG_LEVEL="1"
 
 # Function to open a terminal and run a command
 run_terminal() {
@@ -148,13 +185,30 @@ run_component() {
         env_vars+="export CONFIG_PATH=\"$CONFIG_PATH\""
         command="cd \"$DIR\" && source \"$VENV_PATH/bin/activate\" && $env_vars && python run_server.py; exec bash"
     else
+        # Determinar se este cliente é malicioso
+        is_malicious=false
+        client_type="$HONEST_CLIENT_TYPE"
+        
+        if [ ! -z "$MALICIOUS_CLIENTS" ]; then
+            if [[ ",$MALICIOUS_CLIENTS," == *",$client_id,"* ]]; then
+                is_malicious=true
+                client_type="$MALICIOUS_CLIENT_TYPE"
+                title="$title (Malicioso: $MALICIOUS_CLIENT_TYPE)"
+            fi
+        fi
+        
         env_vars="export CLIENT_ID=\"$client_id\" && "
         env_vars+="export SERVER_URL=\"$SERVER_URL\" && "
         env_vars+="export CUDA_VISIBLE_DEVICES=\"$CUDA_VISIBLE_DEVICES\" && "
         env_vars+="export CONFIG_PATH=\"$CONFIG_PATH\" && "
-        env_vars+="export CLIENT_TYPE=\"$CLIENT_TYPE\" && "
+        env_vars+="export CLIENT_TYPE=\"$client_type\" && "
         env_vars+="export TF_NUM_THREADS=\"$TF_NUM_THREADS\" && "
         env_vars+="export TF_CPP_MIN_LOG_LEVEL=\"$TF_CPP_MIN_LOG_LEVEL\""
+        
+        if [ "$is_malicious" = true ]; then
+            env_vars+=" && export IS_MALICIOUS=\"true\""
+        fi
+        
         command="cd \"$DIR\" && source \"$VENV_PATH/bin/activate\" && $env_vars && python run_client.py; exec bash"
     fi
     
@@ -167,15 +221,33 @@ echo -e "${GREEN}================================================${NC}"
 echo -e "${GREEN}   Starting Federated Learning Environment      ${NC}"
 echo -e "${GREEN}================================================${NC}"
 echo -e "${BLUE}Configuration:${NC}"
-echo -e "  Number of clients: ${YELLOW}$NUM_CLIENTS${NC}"
+echo -e "  Experiment: ${YELLOW}$EXPERIMENT_NAME${NC} Seed: ${YELLOW}$SEED${NC}"
+echo -e "  Dataset: ${YELLOW}$DATASET${NC}"
+echo -e "  Model: ${YELLOW}$MODEL${NC}"
+echo -e "  Number of clients: ${YELLOW}$NUM_CLIENTS${NC} (from config)"
+echo -e "  Total rounds: ${YELLOW}$TOTAL_ROUNDS${NC}"
 echo -e "  Delay between clients: ${YELLOW}$DELAY_BETWEEN seconds${NC}"
 echo -e "  Config file: ${YELLOW}$CONFIG_PATH${NC}"
-echo -e "  Server port: ${YELLOW}$SERVER_PORT${NC}"
+echo -e "  Server host: ${YELLOW}$CONFIG_SERVER_HOST${NC}"
+echo -e "  Server port: ${YELLOW}$CONFIG_SERVER_PORT${NC}"
 echo -e "  Terminal type: ${YELLOW}$TERMINAL_TYPE${NC}"
+
+# Informações sobre clientes maliciosos
+if [ $NUM_MALICIOUS -gt 0 ]; then
+    echo -e "${RED}Configuração de ataque:${NC}"
+    echo -e "  Tipo de cliente honesto: ${YELLOW}$HONEST_CLIENT_TYPE${NC}"
+    echo -e "  Porcentagem de clientes maliciosos: ${YELLOW}$(echo "$MALICIOUS_PERCENTAGE * 100" | bc)%${NC}"
+    echo -e "  Número de clientes maliciosos: ${YELLOW}$NUM_MALICIOUS${NC} de $NUM_CLIENTS"
+    echo -e "  Tipo de ataque: ${YELLOW}$MALICIOUS_CLIENT_TYPE${NC}"
+    echo -e "  IDs dos clientes maliciosos: ${YELLOW}$MALICIOUS_CLIENTS${NC}"
+else
+    echo -e "${GREEN}Sem clientes maliciosos${NC}"
+    echo -e "  Tipo de cliente: ${YELLOW}$HONEST_CLIENT_TYPE${NC}"
+fi
 echo ""
 
 # Start the server
-echo -e "${BLUE}Starting server on port $SERVER_PORT...${NC}"
+echo -e "${BLUE}Starting server on $CONFIG_SERVER_HOST:$CONFIG_SERVER_PORT...${NC}"
 run_component "FL Server" "server"
 
 # Give the server time to start
@@ -210,5 +282,5 @@ echo -e "Server and all $NUM_CLIENTS clients are now running in separate termina
 echo -e "To stop the experiment, close each terminal or press CTRL+C in each window."
 echo ""
 echo -e "${YELLOW}Note: You can run this script with different options:${NC}"
-echo -e "  ${BLUE}./run_federated.sh --clients 10 --delay 5${NC}"
-echo -e "  ${BLUE}./run_federated.sh --help${NC} (for all options)"
+echo -e "  ${BLUE}$0 --config configs/my_custom_config.yaml${NC}"
+echo -e "  ${BLUE}$0 --help${NC} (for all options)"

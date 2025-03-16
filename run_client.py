@@ -28,13 +28,20 @@ if __name__ == "__main__":
     
     # Obter URL do servidor do ambiente
     server_url = os.environ.get('SERVER_URL', f"http://{config['server']['address']}")
+    
+    # Log informativo sobre o tipo de cliente
+    is_malicious = os.environ.get('IS_MALICIOUS', 'false').lower() == 'true'
+    if is_malicious:
+        print(f"[AVISO] Iniciando cliente {client_id} malicioso do tipo '{client_type}'")
+    else:
+        print(f"Iniciando cliente {client_id} honesto do tipo '{client_type}'")
 
     try:
         # Importar classe do client
-        server_module = __import__(f"src.clients.{client_type}_client", fromlist=['FLClient'])
-        FLClient = server_module.FLClient
+        client_module = __import__(f"src.clients.{client_type}_client", fromlist=['FLClient'])
+        FLClient = client_module.FLClient
     except ImportError:
-        raise ImportError(f"Server type '{client_type}' not found")
+        raise ImportError(f"Client type '{client_type}' not found")
     
     # Inicializar e executar cliente
     client = FLClient(client_id, config, server_url)

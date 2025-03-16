@@ -5,7 +5,7 @@ experiment:
   name: "base_scenario"
   description: "Cenário base de Federated Learning sem ataques ou defesas"
   seed: 42
-  rounds: 40
+  rounds: 50
   output_dir: "./results"
   log_level: "info"
 
