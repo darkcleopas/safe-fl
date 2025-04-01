@@ -5,7 +5,7 @@ experiment:
   name: "attack_1"
   description: "Cenário de ataque com 15 clientes e 40% de ataques de label flipping"
   seed: 42
-  rounds: 200
+  rounds: 500
   output_dir: "./results"
   log_level: "info"
 

@@ -283,6 +283,7 @@ class FLClient:
         weights = self.model.get_weights().copy()
         
         # Rodar coleta de lixo para liberar memória
+        tf.keras.backend.clear_session()
         gc.collect()
         
         return weights, self.num_examples, final_loss, final_accuracy
