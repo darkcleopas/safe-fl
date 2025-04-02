@@ -141,7 +141,7 @@ SERVER_URL="http://$CONFIG_SERVER_HOST:$CONFIG_SERVER_PORT"
 DELAY_BETWEEN=10         # Default delay between clients (seconds)
 SERVER_STARTUP_TIME=15   # Time to wait for server initialization (seconds)
 CUDA_VISIBLE_DEVICES="-1"
-TF_NUM_THREADS="4"
+TF_NUM_THREADS="8"
 TF_CPP_MIN_LOG_LEVEL="1"
 
 # Function to open a terminal and run a command

@@ -10,8 +10,9 @@ import base64
 import io
 import gc
 
-from src.utils.model_factory import ModelFactory
+from src.utils.aggregation_factory import AggregationFactory
 from src.utils.dataset_factory import DatasetFactory
+from src.utils.model_factory import ModelFactory
 
 
 class FLServer:
@@ -38,6 +39,13 @@ class FLServer:
         self.max_concurrent_clients = config.get('server', {}).get('max_concurrent_clients', 2)
         self.client_queue = []
         self.active_clients = []
+        
+        # Inicializar estratégia de agregação
+        aggregation_strategy_type = self.server_config.get('aggregation_strategy', 'FED_AVG')
+        self.aggregation_strategy = AggregationFactory.create_aggregation_strategy(
+            aggregation_strategy_type, 
+            self.server_config
+        )
         
         # Definir seed para reprodutibilidade
         self.seed = self.experiment_config.get('seed', 42)
@@ -81,7 +89,7 @@ class FLServer:
         self.selected_clients = []  # Clientes selecionados para o round atual
         self.training_complete = False # Indica se o treinamento foi concluído
 
-        self.logger.info("Servidor inicializado com sucesso")
+        self.logger.info(f"Servidor inicializado com sucesso usando estratégia de agregação {aggregation_strategy_type}")
     
     def setup_logging(self):
         """Configura o sistema de logging."""
@@ -176,47 +184,26 @@ class FLServer:
         Args:
             updates: Lista de tuplas (pesos_modelo, num_exemplos)
         """
-        aggregation_strategy = self.server_config['aggregation_strategy']
-        
-        if aggregation_strategy == 'FED_AVG':
-            self._aggregate_fed_avg(updates)
-        else:
-            self.logger.warning(f"Estratégia de agregação '{aggregation_strategy}' não reconhecida, usando 'FED_AVG'")
-            self._aggregate_fed_avg(updates)
-    
-    def _aggregate_fed_avg(self, updates: List[Tuple[List[np.ndarray], int]]) -> None:
-        """
-        Implementa a estratégia de agregação FedAvg.
-        
-        Args:
-            updates: Lista de tuplas (pesos_modelo, num_exemplos)
-        """
-        # Calcular o total de exemplos
-        total_examples = sum(num_examples for _, num_examples in updates)
-        
-        if total_examples == 0:
-            self.logger.warning("Número total de exemplos é zero. Não é possível agregar os modelos.")
-            return
-        
-        # Obter os pesos de cada modelo e multiplicar pelo número de exemplos
-        weighted_weights = [
-            [layer * num_examples for layer in weights] 
-            for weights, num_examples in updates
-        ]
-        
-        # Calcular a média ponderada para cada camada
-        avg_weights = [
-            np.sum([weights[i] for weights in weighted_weights], axis=0) / total_examples
-            for i in range(len(weighted_weights[0]))
-        ]
+        # try:
+        # Usar a estratégia de agregação configurada
+        aggregated_weights = self.aggregation_strategy.aggregate(updates)
         
         # Aplicar os novos pesos ao modelo global
-        self.model.set_weights(avg_weights)
+        self.model.set_weights(aggregated_weights)
         
         # Salvar o modelo global atualizado
         global_model_path = os.path.join(self.base_dir, f'model_global_round_{self.current_round}.h5')
         self.model.save(global_model_path)
         self.logger.info(f"Modelo global atualizado e salvo em {global_model_path}")
+        
+        # except Exception as e:
+        #     self.logger.error(f"Erro durante a agregação: {str(e)}")
+        #     self.logger.warning("Utilizando FedAvg como estratégia de fallback")
+            
+        #     # Fallback para FedAvg em caso de erro
+        #     fedavg_strategy = AggregationFactory.create_aggregation_strategy("FED_AVG")
+        #     aggregated_weights = fedavg_strategy.aggregate(updates)
+        #     self.model.set_weights(aggregated_weights)
     
     def evaluate_model(self) -> Dict[str, float]:
         """
