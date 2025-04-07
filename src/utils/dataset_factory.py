@@ -7,6 +7,8 @@ from sklearn.model_selection import train_test_split
 from typing import Tuple, List, Optional, Any
 import cv2
 from PIL import Image
+import gc
+
 
 class DatasetFactory:
     """
@@ -97,24 +99,21 @@ class DatasetFactory:
                 for img_file in os.listdir(path):
                     try:
                         img_path = os.path.join(path, img_file)
-                        image = cv2.imread(img_path)
-                        if image is None:
-                            continue
-                            
-                        image_fromarray = Image.fromarray(image, 'RGB')
-                        resize_image = image_fromarray.resize((IMG_HEIGHT, IMG_WIDTH))
-                        images.append(np.array(resize_image))
-                        labels.append(i)
+
+                        with Image.open(img_path).convert('RGB') as image:
+                            resize_image = image.resize((IMG_HEIGHT, IMG_WIDTH))
+                            # Converter para array e normalizar em um único passo
+                            img_array = np.array(resize_image, dtype=np.float16) / 255.0
+                            images.append(img_array)
+                            labels.append(i)
+                    
                     except Exception as e:
                         print(f"Erro ao carregar imagem {img_path}: {e}")
             
-            return np.array(images), np.array(labels)
+            return np.array(images, dtype=np.float16), np.array(labels)
         
         # Carregar dados
         x_images, y_labels = load_images(data_dir)
-
-        # Normalizar imagens
-        x_images = x_images / 255.0
 
         if split == "train":
             # Embaralhar
@@ -127,6 +126,11 @@ class DatasetFactory:
             x_train, x_test, y_train, y_test = train_test_split(
                 x_images, y_labels, test_size=0.3, random_state=42, shuffle=True
             )
+
+            # Liberar memória
+            del x_images
+            del y_labels
+            gc.collect()
             
             # Converter para one-hot encoding
             y_train = tf.keras.utils.to_categorical(y_train, num_categories)
@@ -163,6 +167,10 @@ class DatasetFactory:
             x_test = x_images
             y_test = tf.keras.utils.to_categorical(y_labels, num_categories)
 
+            # Liberar memória
+            del x_images
+            del y_labels
+            gc.collect()
         
         return x_train, y_train, x_test, y_test, num_categories
         

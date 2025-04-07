@@ -2,7 +2,7 @@
 
 # Configurações gerais do experimento
 experiment:
-  name: "attack_2"
+  name: "attack_3"
   description: "Cenário de ataque com 15 clientes e 20% de ataques de label flipping"
   seed: 42
   rounds: 500

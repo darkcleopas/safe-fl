@@ -341,6 +341,11 @@ class FLClient:
             # Enviar para o servidor
             self.logger.info(f"Enviando atualização para o servidor (Rodada {self.current_round})")
             response = requests.post(f"{self.server_url}/update", json=payload)
+
+            # Limpar referências para liberar memória
+            del weights
+            del serialized_weights
+            gc.collect()
             
             if response.status_code != 200:
                 self.logger.error(f"Erro ao enviar atualização: {response.status_code}")
@@ -411,6 +416,7 @@ class FLClient:
                         continue
                     
                     # Limpar recursos
+                    del weights
                     tf.keras.backend.clear_session()
                     gc.collect()
 
