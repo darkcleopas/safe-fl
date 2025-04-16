@@ -362,6 +362,15 @@ class FLServer:
 
         self.logger.info(f"Atualização recebida do cliente {client_id} com {num_examples} exemplos")
         
+        self.check_round_completion()
+
+        return {'status': 'accepted'}
+
+    def check_round_completion(self) -> Dict[str, Any]:
+        """
+        Verifica se todas as atualizações foram recebidas e, se sim, agrega os modelos.
+        """
+
         # Verificar se todos os clientes selecionados enviaram atualizações
         if set(self.round_updates.keys()) == set(self.selected_clients):
             self.logger.info(f"Todas as atualizações recebidas para a rodada {self.current_round}")
@@ -396,8 +405,7 @@ class FLServer:
                 final_model_path = os.path.join(self.base_dir, 'model_final.h5')
                 self.model.save(final_model_path)
                 self.logger.info(f"Treinamento federado concluído. Modelo final salvo em {final_model_path}")
-        
-        return {'status': 'accepted'}
+        return 
     
     def get_round_status(self) -> Dict[str, Any]:
         """

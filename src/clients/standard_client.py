@@ -201,6 +201,20 @@ class FLClient:
         self.model.set_weights(weights)
         self.logger.info("Modelo inicializado com os pesos do servidor")
     
+    def update_model_weights(self, weights: List[np.ndarray]):
+        """
+        Atualiza os pesos do modelo local com os pesos fornecidos.
+        
+        Args:
+            weights: Lista de arrays numpy com os pesos do modelo
+        """
+        if self.model is None:
+            self.initialize_model(weights)
+            return
+        
+        self.model.set_weights(weights)
+        self.logger.info("Pesos do modelo atualizados com sucesso")
+
     def check_round(self) -> Tuple[bool, bool]:
         """
         Verifica o status da rodada atual no servidor.
