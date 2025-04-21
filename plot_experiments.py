@@ -7,46 +7,57 @@ import numpy as np
 from pathlib import Path
 from scipy.signal import savgol_filter
 
+BASE_DIR = 'experiment_results'
+# plt.style.use('ggplot')
+
 # Função para ler todos os experimentos
-def read_experiments(base_dir='results/experiments'):
-    experiments = []
+def read_experiments():
+    experiments = {}
     
-    # Encontrar todos os diretórios de experimentos
-    experiment_dirs = [d for d in glob.glob(f"{base_dir}/*") if os.path.isdir(d)]
+    aggregation_dirs = [d for d in glob.glob(f"{BASE_DIR}/*") if os.path.isdir(d)]
     
-    for exp_dir in experiment_dirs:
-        exp_name = os.path.basename(exp_dir)
-        config_path = os.path.join(exp_dir, 'config.yaml')
-        metrics_path = os.path.join(exp_dir, 'metrics.json')
-        
-        # Verificar se os arquivos existem
-        if not os.path.exists(config_path) or not os.path.exists(metrics_path):
-            print(f"Arquivos ausentes para o experimento {exp_name}, pulando.")
+    for aggregation_dir in aggregation_dirs:
+
+        # Encontrar os diretórios com as variações de experimento
+        exp_dirs = [d for d in glob.glob(f"{aggregation_dir}/*") if os.path.isdir(d)]
+        if not exp_dirs:
+            print(f"Nenhum experimento encontrado em {aggregation_dir}, pulando.")
             continue
+
+        aggregation_name = os.path.basename(aggregation_dir)
+
+        experiments[aggregation_name] = []
+
+        for exp_dir in exp_dirs:
+            exp_name = os.path.basename(exp_dir)
+            config_path = os.path.join(exp_dir, 'config.yaml')
+            metrics_path = os.path.join(exp_dir, 'metrics.json')
         
-        # Ler as configurações do experimento
-        with open(config_path, 'r', encoding='utf-8') as f:
-            config = yaml.safe_load(f)
-        
-        # Ler as métricas do experimento
-        with open(metrics_path, 'r') as f:
-            metrics = json.load(f)
-        
-        # Adicionar experimento à lista
-        experiments.append({
-            'name': exp_name,
-            'config': config,
-            'metrics': metrics
-        })
+            # Verificar se os arquivos existem
+            if not os.path.exists(config_path) or not os.path.exists(metrics_path):
+                print(f"Arquivos ausentes para o experimento {exp_name}, pulando.")
+                continue
+            
+            # Ler as configurações do experimento
+            with open(config_path, 'r', encoding='utf-8') as f:
+                config = yaml.safe_load(f)
+            
+            # Ler as métricas do experimento
+            with open(metrics_path, 'r') as f:
+                metrics = json.load(f)
+            
+            # Adicionar experimento à lista
+            experiments[aggregation_name].append({
+                'name': exp_name,
+                'config': config,
+                'metrics': metrics
+            })
     
     return experiments
 
 # Criar uma legenda informativa para cada experimento
 def create_label(exp):
     config = exp['config']
-    
-    # Nome do experimento
-    exp_name = config.get('experiment', {}).get('name', exp['name'])
     
     # Estratégia de ataque (se houver)
     malicious_type = config.get('clients', {}).get('malicious_client_type', 'none')
@@ -57,9 +68,9 @@ def create_label(exp):
     
     # Se não há ataque (clientes maliciosos), simplificar a legenda
     if malicious_type == 'standard' or malicious_percentage == 0:
-        return f"{exp_name} - {defense_strategy}"
+        return f"{defense_strategy} - No Attack"
     else:
-        return f"{exp_name} - {defense_strategy} vs {malicious_type} ({int(malicious_percentage*100)}%)"
+        return f"{defense_strategy} vs {malicious_type} ({int(malicious_percentage*100)}%)"
 
 # Função para aplicar suavização às curvas (opcional)
 def smooth_curve(y, window_size=11, poly_order=3):
@@ -74,6 +85,7 @@ def plot_accuracies(experiments,
                     window_size=31, 
                     max_rounds=None, 
                     selected_experiments=None,
+                    experiment_group=None,
                     line_styles=None,
                     subplots=False):
     
@@ -147,7 +159,8 @@ def plot_accuracies(experiments,
     # Nome do arquivo baseado nos parâmetros
     smooth_str = "_smooth" if smooth else ""
     max_str = f"_max{max_rounds}" if max_rounds else ""
-    plt.savefig(f'accuracies_plot{smooth_str}{max_str}.png', dpi=300)
+    experiment_group = f"_{experiment_group}" if experiment_group else ""
+    plt.savefig(f'{BASE_DIR}/accuracies_plot{experiment_group}{smooth_str}{max_str}.png', dpi=300)
     
     # plt.show()
 
@@ -157,6 +170,7 @@ def plot_losses(experiments,
                 window_size=31, 
                 max_rounds=None, 
                 selected_experiments=None,
+                experiment_group=None,
                 line_styles=None,
                 subplots=False):
     
@@ -229,15 +243,17 @@ def plot_losses(experiments,
     
     # Nome do arquivo baseado nos parâmetros
     smooth_str = "_smooth" if smooth else ""
+    experiment_group = f"_{experiment_group}" if experiment_group else ""
     max_str = f"_max{max_rounds}" if max_rounds else ""
-    plt.savefig(f'losses_plot{smooth_str}{max_str}.png', dpi=300)
+    plt.savefig(f'{BASE_DIR}/losses_plot{experiment_group}{smooth_str}{max_str}.png', dpi=300)
     
     # plt.show()
 
 # Função para analisar as tendências nos experimentos
-def analyze_experiments(experiments):
+def analyze_experiments(experiments, experiment_group=None):
     """Analisa os resultados e fornece insights sobre os experimentos"""
     print("\n=== ANÁLISE DOS EXPERIMENTOS ===")
+    print(f"Grupo de experimentos: {experiment_group}")
     
     # Ordenar experimentos por acurácia final
     experiments_by_acc = sorted(
@@ -295,8 +311,11 @@ def main():
         print("Nenhum experimento encontrado!")
         return
     
-    print(f"Encontrados {len(experiments)} experimentos")
-    
+    for experiment_group, exps in experiments.items():
+        print(f"\nExperimentos para {experiment_group}:")
+        for exp in exps:
+            print(f" - {exp['name']}")
+        
     # Configurações para os gráficos
     smooth = True           # Suavizar as curvas
     window_size = 31        # Tamanho da janela para suavização
@@ -308,32 +327,36 @@ def main():
     # selected_exps = ['base', 'defense']  # Mostrar apenas experimentos com 'base' ou 'defense' no nome
     
     print("Gerando plot de acurácias...")
-    plot_accuracies(
-        experiments, 
-        smooth=smooth, 
-        window_size=window_size,
-        max_rounds=max_rounds,
-        selected_experiments=selected_exps,
-        subplots=use_subplots
-    )
+    for exp_group, exps in experiments.items():
+        
+        plot_accuracies(
+            exps, 
+            smooth=smooth, 
+            window_size=window_size,
+            max_rounds=max_rounds,
+            selected_experiments=selected_exps,
+            experiment_group=exp_group,
+            subplots=use_subplots
+        )
     
     print("Gerando plot de losses...")
-    plot_losses(
-        experiments, 
-        smooth=smooth, 
-        window_size=window_size,
-        max_rounds=max_rounds,
-        selected_experiments=selected_exps,
-        subplots=use_subplots
-    )
+    for exp_group, exps in experiments.items():
+        
+        plot_losses(
+            exps, 
+            smooth=smooth, 
+            window_size=window_size,
+            max_rounds=max_rounds,
+            selected_experiments=selected_exps,
+            experiment_group=exp_group,
+            subplots=use_subplots
+        )
     
     # Analisar os resultados
-    analyze_experiments(experiments)
+    for exp_group, exps in experiments.items():
+        analyze_experiments(exps, exp_group)
     
-    # Nome dos arquivos baseado nos parâmetros
-    smooth_str = "_smooth" if smooth else ""
-    max_str = f"_max{max_rounds}" if max_rounds else ""
-    print(f"\nPronto! Os plots foram salvos como 'accuracies_plot{smooth_str}{max_str}.png' e 'losses_plot{smooth_str}{max_str}.png'")
+    print(f"\nPronto!")
 
 if __name__ == "__main__":
     main()

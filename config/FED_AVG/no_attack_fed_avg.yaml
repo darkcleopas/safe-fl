@@ -2,7 +2,7 @@
 
 # Configurações gerais do experimento
 experiment:
-  name: "base_1"
+  name: "no_attack_fed_avg"
   description: "Cenário base de Federated Learning sem ataques ou defesas"
   seed: 42
   rounds: 500

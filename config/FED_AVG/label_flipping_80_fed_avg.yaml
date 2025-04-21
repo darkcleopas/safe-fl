@@ -2,8 +2,8 @@
 
 # Configurações gerais do experimento
 experiment:
-  name: "defense_1"
-  description: "Cenário de defesa com trimmed mean com 15 clientes e 40% de ataques de label flipping"
+  name: "label_flipping_80_fed_avg"
+  description: "Cenário de ataque com 15 clientes e 80% de ataques de label flipping"
   seed: 42
   rounds: 500
   output_dir: "./results"
@@ -24,8 +24,7 @@ model:
 server:
   type: "standard"  # Tipo de servidor (base, com defesas, etc.)
   address: "0.0.0.0:8000"  # Endereço dentro da rede Docker
-  aggregation_strategy: "TRIMMED_MEAN"  # Estratégia de agregação
-  trim_ratio: 0.4  # Fração de clientes a serem considerados na média truncada
+  aggregation_strategy: "FED_AVG"  # Estratégia de agregação
   selection_strategy: "random"  # Estratégia de seleção de clientes
   selection_fraction: 0.4  # Fração de clientes selecionados por round
   evaluation_interval: 1  # Intervalo de avaliação do modelo global (em rounds)
@@ -36,4 +35,4 @@ clients:
   num_clients: 15  # Número total de clientes
   honest_client_type: "standard"  # Tipo de cliente honesto (base, com defesas, etc.)
   malicious_client_type: "label_flipping"  # Tipo de ataque malicioso (data_poisoning, model_poisoning, etc.)
-  malicious_percentage: 0.4  # Porcentagem de clientes maliciosos (0 para cenário base)
+  malicious_percentage: 0.8  # Porcentagem de clientes maliciosos (0 para cenário base)

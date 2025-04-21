@@ -2,8 +2,8 @@
 
 # Configurações gerais do experimento
 experiment:
-  name: "defense_2"
-  description: "Cenário de defesa com trimmed mean com 15 clientes e 20% de ataques de label flipping"
+  name: "label_flipping_40_trimmed_mean"
+  description: "Cenário de defesa com trimmed mean com 15 clientes e 40% de ataques de label flipping"
   seed: 42
   rounds: 500
   output_dir: "./results"
@@ -36,4 +36,4 @@ clients:
   num_clients: 15  # Número total de clientes
   honest_client_type: "standard"  # Tipo de cliente honesto (base, com defesas, etc.)
   malicious_client_type: "label_flipping"  # Tipo de ataque malicioso (data_poisoning, model_poisoning, etc.)
-  malicious_percentage: 0.2  # Porcentagem de clientes maliciosos (0 para cenário base)
+  malicious_percentage: 0.4  # Porcentagem de clientes maliciosos (0 para cenário base)
