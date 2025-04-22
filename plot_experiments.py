@@ -8,15 +8,23 @@ from pathlib import Path
 from scipy.signal import savgol_filter
 
 BASE_DIR = 'experiment_results'
-# plt.style.use('ggplot')
+PLOTS_DIR = os.path.join(BASE_DIR, 'plots')
+
+# Criar diretório para os plots se não existir
+if not os.path.exists(PLOTS_DIR):
+    os.makedirs(PLOTS_DIR)
 
 # Função para ler todos os experimentos
 def read_experiments():
     experiments = {}
+    no_attack_exps = []  # Lista para armazenar experimentos sem ataque
     
     aggregation_dirs = [d for d in glob.glob(f"{BASE_DIR}/*") if os.path.isdir(d)]
     
     for aggregation_dir in aggregation_dirs:
+        # Ignorar diretório de plots
+        if os.path.basename(aggregation_dir) == 'plots':
+            continue
 
         # Encontrar os diretórios com as variações de experimento
         exp_dirs = [d for d in glob.glob(f"{aggregation_dir}/*") if os.path.isdir(d)]
@@ -25,8 +33,6 @@ def read_experiments():
             continue
 
         aggregation_name = os.path.basename(aggregation_dir)
-
-        experiments[aggregation_name] = []
 
         for exp_dir in exp_dirs:
             exp_name = os.path.basename(exp_dir)
@@ -46,31 +52,65 @@ def read_experiments():
             with open(metrics_path, 'r') as f:
                 metrics = json.load(f)
             
-            # Adicionar experimento à lista
-            experiments[aggregation_name].append({
+            # Criar objeto de experimento
+            experiment = {
                 'name': exp_name,
                 'config': config,
-                'metrics': metrics
-            })
+                'metrics': metrics,
+                'aggregation': aggregation_name
+            }
+            
+            # Extrair o tipo de ataque a partir do nome do experimento
+            attack_type = extract_attack_type(exp_name)
+            
+            # Armazenar experimentos sem ataque separadamente
+            if attack_type == 'no_attack':
+                no_attack_exps.append(experiment)
+            
+            # Adicionar experimento ao dicionário
+            if attack_type not in experiments:
+                experiments[attack_type] = []
+                
+            experiments[attack_type].append(experiment)
+    
+    # Adicionar experimentos sem ataque a todos os outros tipos de ataque
+    for attack_type, exps in experiments.items():
+        if attack_type != 'no_attack':
+            # Criar cópia dos experimentos sem ataque para cada tipo de ataque
+            for no_attack_exp in no_attack_exps:
+                # Verificar se já não existe um experimento sem ataque com o mesmo método de agregação
+                if not any(exp['aggregation'] == no_attack_exp['aggregation'] and 'no_attack' in exp['name'] for exp in exps):
+                    exps.append(no_attack_exp)
     
     return experiments
 
+# Função para extrair o tipo de ataque do nome do experimento
+def extract_attack_type(exp_name):
+    # Exemplo de nomes: label_flipping_10_fed_avg, no_attack_trimmed_mean
+    if exp_name.startswith('no_attack'):
+        return 'no_attack'
+    elif 'label_flipping' in exp_name:
+        # Extrair o percentual de ataque (10, 20, 40, 80)
+        parts = exp_name.split('_')
+        if len(parts) >= 3:
+            return f"label_flipping_{parts[2]}"
+    
+    # Caso não consiga identificar o tipo específico
+    return 'unknown'
+
 # Criar uma legenda informativa para cada experimento
 def create_label(exp):
-    config = exp['config']
+    aggregation_name = exp['aggregation']
     
     # Estratégia de ataque (se houver)
-    malicious_type = config.get('clients', {}).get('malicious_client_type', 'none')
-    malicious_percentage = config.get('clients', {}).get('malicious_percentage', 0)
-    
-    # Estratégia de defesa (se houver)
-    defense_strategy = config.get('server', {}).get('aggregation_strategy', 'FEDAVG')
+    malicious_type = exp['config'].get('clients', {}).get('malicious_client_type', 'none')
+    malicious_percentage = exp['config'].get('clients', {}).get('malicious_percentage', 0)
     
     # Se não há ataque (clientes maliciosos), simplificar a legenda
     if malicious_type == 'standard' or malicious_percentage == 0:
-        return f"{defense_strategy} - No Attack"
+        return f"{aggregation_name} - Sem Ataque"
     else:
-        return f"{defense_strategy} vs {malicious_type} ({int(malicious_percentage*100)}%)"
+        return f"{aggregation_name} vs {malicious_type} ({int(malicious_percentage*100)}%)"
 
 # Função para aplicar suavização às curvas (opcional)
 def smooth_curve(y, window_size=11, poly_order=3):
@@ -83,20 +123,13 @@ def smooth_curve(y, window_size=11, poly_order=3):
 def plot_accuracies(experiments, 
                     smooth=True, 
                     window_size=31, 
-                    max_rounds=None, 
-                    selected_experiments=None,
-                    experiment_group=None,
+                    max_rounds=None,
+                    attack_type=None,
                     line_styles=None,
                     subplots=False):
     
-    if selected_experiments:
-        # Filtrar apenas os experimentos selecionados
-        filtered_exps = [exp for exp in experiments if any(name in exp['name'] for name in selected_experiments)]
-    else:
-        filtered_exps = experiments
-
-    # Ordenar os experimentos por nome
-    filtered_exps.sort(key=lambda x: x['name'])
+    # Ordenar os experimentos por nome, colocando experimentos sem ataque primeiro
+    filtered_exps = sorted(experiments, key=lambda x: (0 if 'no_attack' in x['name'] else 1, x['name']))
     
     if not filtered_exps:
         print("Nenhum experimento encontrado com os filtros aplicados!")
@@ -105,7 +138,13 @@ def plot_accuracies(experiments,
     colors = plt.cm.tab10(np.linspace(0, 1, len(filtered_exps)))
     
     if not line_styles:
-        line_styles = ['-'] * len(filtered_exps)
+        # Usar linha sólida para experimentos sem ataque e linha tracejada para experimentos com ataque
+        line_styles = []
+        for exp in filtered_exps:
+            if 'no_attack' in exp['name']:
+                line_styles.append('-')  # Linha sólida
+            else:
+                line_styles.append('--')  # Linha tracejada
     
     if subplots:
         fig, axes = plt.subplots(len(filtered_exps), 1, figsize=(12, 4*len(filtered_exps)), sharex=True)
@@ -139,6 +178,7 @@ def plot_accuracies(experiments,
             ax.set_title(label, fontsize=12)
             ax.grid(True, linestyle='--', alpha=0.3)
             ax.set_ylabel('Acurácia', fontsize=10)
+            ax.set_ylim(0, 1)  # Definir limite de 0 a 1 para acurácia
             
             # Apenas o último subplot mostra o eixo x
             if i == len(filtered_exps) - 1:
@@ -148,9 +188,15 @@ def plot_accuracies(experiments,
                        label=label, color=colors[i], linestyle=line_styles[i])
     
     if not subplots:
-        axes[0].set_title('Acurácia do modelo ao longo das rodadas', fontsize=16)
+        if attack_type == 'no_attack':
+            title = 'Acurácia do modelo sem ataques'
+        else:
+            title = f'Acurácia do modelo com ataque {attack_type}'
+            
+        axes[0].set_title(title, fontsize=16)
         axes[0].set_xlabel('Rodada', fontsize=14)
         axes[0].set_ylabel('Acurácia', fontsize=14)
+        axes[0].set_ylim(0, 1)  # Definir limite de 0 a 1 para acurácia
         axes[0].grid(True, linestyle='--', alpha=0.3)
         axes[0].legend(loc='best', fontsize=10)
     
@@ -159,8 +205,8 @@ def plot_accuracies(experiments,
     # Nome do arquivo baseado nos parâmetros
     smooth_str = "_smooth" if smooth else ""
     max_str = f"_max{max_rounds}" if max_rounds else ""
-    experiment_group = f"_{experiment_group}" if experiment_group else ""
-    plt.savefig(f'{BASE_DIR}/accuracies_plot{experiment_group}{smooth_str}{max_str}.png', dpi=300)
+    attack_str = f"_{attack_type}" if attack_type else ""
+    plt.savefig(f'{PLOTS_DIR}/accuracies_plot{attack_str}{smooth_str}{max_str}.png', dpi=300)
     
     # plt.show()
 
@@ -168,20 +214,13 @@ def plot_accuracies(experiments,
 def plot_losses(experiments, 
                 smooth=True, 
                 window_size=31, 
-                max_rounds=None, 
-                selected_experiments=None,
-                experiment_group=None,
+                max_rounds=None,
+                attack_type=None,
                 line_styles=None,
                 subplots=False):
     
-    if selected_experiments:
-        # Filtrar apenas os experimentos selecionados
-        filtered_exps = [exp for exp in experiments if any(name in exp['name'] for name in selected_experiments)]
-    else:
-        filtered_exps = experiments
-    
-    # Ordenar os experimentos por nome
-    filtered_exps.sort(key=lambda x: x['name'])
+    # Ordenar os experimentos por nome, colocando experimentos sem ataque primeiro
+    filtered_exps = sorted(experiments, key=lambda x: (0 if 'no_attack' in x['name'] else 1, x['name']))
     
     if not filtered_exps:
         print("Nenhum experimento encontrado com os filtros aplicados!")
@@ -190,7 +229,13 @@ def plot_losses(experiments,
     colors = plt.cm.tab10(np.linspace(0, 1, len(filtered_exps)))
     
     if not line_styles:
-        line_styles = ['-'] * len(filtered_exps)
+        # Usar linha sólida para experimentos sem ataque e linha tracejada para experimentos com ataque
+        line_styles = []
+        for exp in filtered_exps:
+            if 'no_attack' in exp['name']:
+                line_styles.append('-')  # Linha sólida
+            else:
+                line_styles.append('--')  # Linha tracejada
     
     if subplots:
         fig, axes = plt.subplots(len(filtered_exps), 1, figsize=(12, 4*len(filtered_exps)), sharex=True)
@@ -224,6 +269,7 @@ def plot_losses(experiments,
             ax.set_title(label, fontsize=12)
             ax.grid(True, linestyle='--', alpha=0.3)
             ax.set_ylabel('Loss', fontsize=10)
+            ax.set_ylim(0, 25)  # Definir limite de 0 a 25 para loss
             
             # Apenas o último subplot mostra o eixo x
             if i == len(filtered_exps) - 1:
@@ -233,9 +279,15 @@ def plot_losses(experiments,
                        label=label, color=colors[i], linestyle=line_styles[i])
     
     if not subplots:
-        axes[0].set_title('Loss do modelo ao longo das rodadas', fontsize=16)
+        if attack_type == 'no_attack':
+            title = 'Loss do modelo sem ataques'
+        else:
+            title = f'Loss do modelo com ataque {attack_type}'
+            
+        axes[0].set_title(title, fontsize=16)
         axes[0].set_xlabel('Rodada', fontsize=14)
         axes[0].set_ylabel('Loss', fontsize=14)
+        axes[0].set_ylim(0, 25)  # Definir limite de 0 a 25 para loss
         axes[0].grid(True, linestyle='--', alpha=0.3)
         axes[0].legend(loc='best', fontsize=10)
     
@@ -243,9 +295,9 @@ def plot_losses(experiments,
     
     # Nome do arquivo baseado nos parâmetros
     smooth_str = "_smooth" if smooth else ""
-    experiment_group = f"_{experiment_group}" if experiment_group else ""
     max_str = f"_max{max_rounds}" if max_rounds else ""
-    plt.savefig(f'{BASE_DIR}/losses_plot{experiment_group}{smooth_str}{max_str}.png', dpi=300)
+    attack_str = f"_{attack_type}" if attack_type else ""
+    plt.savefig(f'{PLOTS_DIR}/losses_plot{attack_str}{smooth_str}{max_str}.png', dpi=300)
     
     # plt.show()
 
@@ -305,58 +357,55 @@ def analyze_experiments(experiments, experiment_group=None):
 # Função principal com mais opções
 def main():
     print("Lendo experimentos...")
-    experiments = read_experiments()
+    experiments_by_attack = read_experiments()
     
-    if not experiments:
+    if not experiments_by_attack:
         print("Nenhum experimento encontrado!")
         return
     
-    for experiment_group, exps in experiments.items():
-        print(f"\nExperimentos para {experiment_group}:")
+    for attack_type, exps in experiments_by_attack.items():
+        print(f"\nExperimentos para ataque {attack_type}:")
         for exp in exps:
-            print(f" - {exp['name']}")
+            print(f" - {exp['name']} ({exp['aggregation']})")
         
     # Configurações para os gráficos
     smooth = True           # Suavizar as curvas
     window_size = 31        # Tamanho da janela para suavização
     max_rounds = None       # Limitar número de rodadas (None = todas)
-    selected_exps = None    # Filtrar experimentos específicos (None = todos)
     use_subplots = False    # Usar subplots separados para cada experimento
     
-    # Exemplo de como filtrar apenas alguns experimentos:
-    # selected_exps = ['base', 'defense']  # Mostrar apenas experimentos com 'base' ou 'defense' no nome
-    
-    print("Gerando plot de acurácias...")
-    for exp_group, exps in experiments.items():
+    print(f"Gerando plots na pasta {PLOTS_DIR}...")
+    for attack_type, exps in experiments_by_attack.items():
+        # Pular a categoria 'no_attack' uma vez que já está incluída em todas as outras
+        if attack_type == 'no_attack':
+            print(f"Gerando plots para experimentos sem ataque...")
+        else:
+            print(f"Gerando plots para ataque {attack_type}...")
         
+        # Plotar acurácias
         plot_accuracies(
             exps, 
             smooth=smooth, 
             window_size=window_size,
             max_rounds=max_rounds,
-            selected_experiments=selected_exps,
-            experiment_group=exp_group,
+            attack_type=attack_type,
             subplots=use_subplots
         )
-    
-    print("Gerando plot de losses...")
-    for exp_group, exps in experiments.items():
         
+        # Plotar losses
         plot_losses(
             exps, 
             smooth=smooth, 
             window_size=window_size,
             max_rounds=max_rounds,
-            selected_experiments=selected_exps,
-            experiment_group=exp_group,
+            attack_type=attack_type,
             subplots=use_subplots
         )
+        
+        # Analisar os resultados
+        analyze_experiments(exps, attack_type)
     
-    # Analisar os resultados
-    for exp_group, exps in experiments.items():
-        analyze_experiments(exps, exp_group)
-    
-    print(f"\nPronto!")
+    print(f"\nPronto! Os gráficos foram salvos na pasta {PLOTS_DIR}")
 
 if __name__ == "__main__":
     main()
