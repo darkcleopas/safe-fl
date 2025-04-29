@@ -2,6 +2,8 @@ import numpy as np
 from typing import List, Tuple, Dict, Any
 from abc import ABC, abstractmethod
 import logging
+from scipy.cluster.hierarchy import linkage, fcluster
+from scipy.spatial.distance import squareform
 
 
 class AggregationStrategy(ABC):
@@ -227,6 +229,12 @@ class TrimmedMeanStrategy(AggregationStrategy):
 class KrumStrategy(AggregationStrategy):
     """
     Implementação da estratégia de agregação Krum.
+    
+    O algoritmo Krum seleciona o modelo com a menor soma de distâncias para seus k modelos mais próximos,
+    onde k = n - f - 2 (n é o número total de modelos e f é o número estimado de modelos maliciosos).
+    
+    Multi-Krum é uma variação que seleciona os m modelos com as menores somas de distâncias e então
+    calcula a média ponderada desses modelos.
     """
     
     def __init__(self, config: Dict[str, Any] = None):
@@ -238,10 +246,13 @@ class KrumStrategy(AggregationStrategy):
                 num_malicious: Número estimado de clientes maliciosos
                 multi_krum: Se True, usa Multi-Krum (seleciona múltiplos modelos)
                 malicious_percentage: Porcentagem de clientes maliciosos (usado se num_malicious não for fornecido)
+                num_to_select: Em Multi-Krum, número de modelos a selecionar (padrão: n-f)
         """
         super().__init__(config)
         self.num_malicious = self.config.get('num_malicious')
         self.multi_krum = self.config.get('multi_krum', False)
+        # Número de modelos a selecionar no Multi-Krum (se None, usa n-f)
+        self.num_to_select = self.config.get('num_to_select')
     
     def aggregate(self, updates: List[Tuple[List[np.ndarray], int]]) -> List[np.ndarray]:
         """
@@ -280,8 +291,8 @@ class KrumStrategy(AggregationStrategy):
         
         # Garantir que num_malicious seja válido
         if num_malicious >= num_models / 2:
-            self.logger.warning(f"Número de clientes maliciosos muito alto ({num_malicious}), ajustando")
-            num_malicious = num_models // 2 - 1
+            self.logger.warning(f"Número de clientes maliciosos muito alto ({num_malicious}), ajustando para (n/2)-1")
+            num_malicious = max(1, num_models // 2 - 1)
         
         # Achatar os pesos para calcular distâncias entre modelos
         flattened_weights = []
@@ -293,15 +304,18 @@ class KrumStrategy(AggregationStrategy):
         distances = np.zeros((num_models, num_models))
         
         for i in range(num_models):
-            for j in range(i+1, num_models):
-                dist = np.linalg.norm(flattened_weights[i] - flattened_weights[j])
-                distances[i, j] = dist
-                distances[j, i] = dist
+            for j in range(num_models):
+                if i == j:
+                    distances[i, j] = 0  # Distância de um modelo para si mesmo é 0
+                else:
+                    dist = np.linalg.norm(flattened_weights[i] - flattened_weights[j])
+                    distances[i, j] = dist**2  # Usamos distância euclidiana ao quadrado
         
         # Para cada modelo, calcular a soma das distâncias para os k modelos mais próximos
         k = num_models - num_malicious - 2  # conforme o algoritmo Krum
         if k < 1:
             k = 1
+            self.logger.warning(f"k foi ajustado para 1 devido ao baixo número de modelos")
         
         scores = []
         for i in range(num_models):
@@ -309,10 +323,17 @@ class KrumStrategy(AggregationStrategy):
             closest_distances = np.sort(distances[i])[1:k+1]
             scores.append(np.sum(closest_distances))
         
+        self.logger.info(f"Scores Krum calculados: {scores}")
+        
         if self.multi_krum:
             # Multi-Krum: selecionar os m modelos com menor score
-            m = num_models - num_malicious
-            selected_indices = np.argsort(scores)[:m]
+            if self.num_to_select:
+                m = min(self.num_to_select, num_models)
+            else:
+                m = max(1, num_models - num_malicious)
+            
+            # Ordenar índices pelo score (crescente) e pegar os m primeiros
+            selected_indices = np.argsort(scores)[:m].tolist()
             self.logger.info(f"Modelos selecionados pelo Multi-Krum: {selected_indices}")
             
             # Fazer média ponderada dos modelos selecionados
@@ -320,6 +341,158 @@ class KrumStrategy(AggregationStrategy):
             return FedAvgStrategy().aggregate(selected_updates)
         else:
             # Krum: selecionar o modelo com menor score
-            best_model_idx = np.argmin(scores)
-            self.logger.info(f"Modelo selecionado pelo Krum: cliente com índice {best_model_idx}")
+            best_model_idx = int(np.argmin(scores))
+            self.logger.info(f"Modelo selecionado pelo Krum: cliente com índice {best_model_idx}, score: {scores[best_model_idx]}")
             return all_weights[best_model_idx]
+
+
+class ClusteringStrategy(AggregationStrategy):
+    """
+    Implementação da estratégia de agregação baseada em Clustering.
+    Separa os modelos em grupos usando agglomerative clustering com base na distância de cosseno.
+    """
+    
+    def aggregate(self, updates: List[Tuple[List[np.ndarray], int]]) -> List[np.ndarray]:
+        """
+        Agrega os pesos do modelo usando Clustering.
+        
+        Args:
+            updates: Lista de tuplas (pesos_modelo, num_exemplos)
+            
+        Returns:
+            Lista de arrays numpy com os pesos agregados
+        """
+        self.validate_updates(updates)
+        
+        self.logger.info("Aplicando agregação Clustering")
+        
+        # Extrair apenas os pesos dos modelos e o número de exemplos
+        all_weights = [weights for weights, _ in updates]
+        num_examples = [n_examples for _, n_examples in updates]
+        
+        # Caso especial: se houver apenas um modelo, retorná-lo diretamente
+        if len(all_weights) == 1:
+            self.logger.info("Apenas um modelo disponível, retornando-o diretamente")
+            return all_weights[0]
+        
+        # Caso especial: se houver apenas dois modelos, calcular a média
+        if len(all_weights) == 2:
+            self.logger.info("Apenas dois modelos disponíveis, calculando a média")
+            return FedAvgStrategy().aggregate(updates)
+        
+        # Identificar o maior cluster
+        biggest_cluster = self._clustering_filtering(all_weights)
+        
+        if not biggest_cluster:
+            self.logger.warning("Nenhum cluster identificado, usando FedAvg com todos os modelos")
+            return FedAvgStrategy().aggregate(updates)
+        
+        # Selecionar modelos do maior cluster
+        selected_updates = [(all_weights[i], num_examples[i]) for i in biggest_cluster]
+        self.logger.info(f"Selecionados {len(biggest_cluster)} modelos para agregação de {len(all_weights)} disponíveis")
+        
+        # Usar FedAvg para calcular a média dos modelos selecionados
+        return FedAvgStrategy().aggregate(selected_updates)
+    
+    def _clustering_filtering(self, models: List[List[np.ndarray]]) -> List[int]:
+        """
+        Separa os modelos em dois grupos usando agglomerative clustering com average link
+        baseado na matriz de distância de cosseno entre cada par de modelos.
+        
+        Args:
+            models: Lista de modelos (cada modelo é uma lista de arrays numpy)
+            
+        Returns:
+            Lista de índices correspondentes ao maior cluster
+        """
+        if len(models) <= 2:
+            return list(range(len(models)))  # Retornar todos os índices para casos simples
+        
+        # Compute cosine similarities between vectors
+        similarity_matrix = self._compute_cosine_similarity_matrix(models)
+        
+        # Transform the similarity matrix into a condensed distance matrix
+        try:
+            biggest_cluster = self._agglomerative_clustering(squareform(similarity_matrix))
+            return biggest_cluster
+        except Exception as e:
+            self.logger.error(f"Erro ao realizar clustering: {str(e)}")
+            return list(range(len(models)))  # Em caso de erro, usar todos os modelos
+    
+    def _agglomerative_clustering(self, agglomerative_distance: np.ndarray) -> List[int]:
+        """
+        Aplica agglomerative clustering e retorna o maior cluster.
+        
+        Args:
+            agglomerative_distance: Matriz de distância condensada
+            
+        Returns:
+            Lista de índices correspondentes ao maior cluster
+        """
+        # Apply agglomerative clustering with average link
+        Z = linkage(agglomerative_distance, 'average')
+        Z = np.abs(Z)
+        
+        # Generate two clusters
+        clusters = fcluster(Z, t=2, criterion='maxclust')
+        
+        # Extracting the indices of the biggest cluster
+        cluster_1 = [i for i, c in enumerate(clusters) if c == 1]
+        cluster_2 = [i for i, c in enumerate(clusters) if c == 2]
+        
+        # Log information about clusters
+        self.logger.info(f"Cluster 1 tamanho: {len(cluster_1)}, Cluster 2 tamanho: {len(cluster_2)}")
+        
+        return cluster_1 if len(cluster_1) >= len(cluster_2) else cluster_2
+    
+    def _compute_cosine_similarity_matrix(self, models: List[List[np.ndarray]]) -> np.ndarray:
+        """
+        Computa uma matriz com a distância/similaridade de cosseno entre cada par de modelos.
+        
+        Args:
+            models: Lista de modelos (cada modelo é uma lista de arrays numpy)
+            
+        Returns:
+            Matriz de similaridade de cosseno
+        """
+        # Flatten model weights for easier computation
+        flattened_models = []
+        for model in models:
+            flattened = np.concatenate([w.flatten() for w in model])
+            flattened_models.append(flattened)
+        
+        num_models = len(flattened_models)
+        similarity_matrix = np.zeros((num_models, num_models))
+        
+        for i in range(num_models):
+            for j in range(num_models):
+                if i == j:
+                    similarity_matrix[i, j] = 0  # Distância de um modelo para si mesmo é 0
+                else:
+                    similarity = self._compute_cosine_similarity(flattened_models[i], flattened_models[j])
+                    similarity_matrix[i, j] = similarity
+        
+        return similarity_matrix
+    
+    def _compute_cosine_similarity(self, model_1: np.ndarray, model_2: np.ndarray) -> float:
+        """
+        Computa a similaridade de cosseno entre dois vetores.
+        
+        Args:
+            model_1: Primeiro vetor
+            model_2: Segundo vetor
+            
+        Returns:
+            Similaridade de cosseno (valor entre 0 e 1, onde 1 indica vetores idênticos)
+        """
+        norm_1 = np.linalg.norm(model_1)
+        norm_2 = np.linalg.norm(model_2)
+        
+        if norm_1 == 0 or norm_2 == 0:
+            return 0
+        
+        inner_product = np.dot(model_1, model_2)
+        cosine_similarity = 1 - (inner_product / (norm_1 * norm_2))
+        
+        # Garante que a similaridade esteja no intervalo [0, 1]
+        return max(0, min(1, cosine_similarity))

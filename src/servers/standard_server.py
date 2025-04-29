@@ -62,6 +62,10 @@ class FLServer:
             self.run_log
         )
         os.makedirs(self.base_dir, exist_ok=True)
+
+        # Configurar diretório de modelos intermediários
+        self.intermediate_models_dir = os.path.join(self.base_dir, 'intermediate_models')
+        os.makedirs(self.intermediate_models_dir, exist_ok=True)
         
         # Salvar configuração
         self.save_config()
@@ -192,7 +196,7 @@ class FLServer:
         self.model.set_weights(aggregated_weights)
         
         # Salvar o modelo global atualizado
-        global_model_path = os.path.join(self.base_dir, f'model_global_round_{self.current_round}.h5')
+        global_model_path = f'{self.intermediate_models_dir}/model_global_round_{self.current_round}.h5'
         self.model.save(global_model_path)
         self.logger.info(f"Modelo global atualizado e salvo em {global_model_path}")
         

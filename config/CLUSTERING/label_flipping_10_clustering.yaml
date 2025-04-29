@@ -1,0 +1,38 @@
+# Configuração padrão para o framework de segurança em Federated Learning
+
+# Configurações gerais do experimento
+experiment:
+  name: "label_flipping_10_clustering"
+  description: "Cenário de defesa com Clustering com 15 clientes e 10% de ataques de label flipping"
+  seed: 42
+  rounds: 500
+  output_dir: "./results"
+  log_level: "info"
+
+# Configurações do dataset
+dataset:
+  name: "SIGN"  # Opções: MNIST, SIGN, CIFAR10, etc.
+  non_iid: true  # Distribuição não-IID entre clientes
+
+# Configurações do modelo
+model:
+  type: "CNN_SIGN"  # Tipo de modelo (CNN_SIGN, DNN, VGG, GENERIC_MODEL)
+  local_epochs: 5
+  batch_size: 32
+
+# Configurações do servidor (RSU)
+server:
+  type: "standard"  # Tipo de servidor (base, com defesas, etc.)
+  address: "0.0.0.0:8000"  # Endereço dentro da rede Docker
+  aggregation_strategy: "CLUSTERING"  # Estratégia de agregação
+  selection_strategy: "random"  # Estratégia de seleção de clientes
+  selection_fraction: 0.4  # Fração de clientes selecionados por round
+  evaluation_interval: 1  # Intervalo de avaliação do modelo global (em rounds)
+  max_concurrent_clients: 3  # Número máximo de clientes treinando simultaneamente
+
+# Configurações dos clientes
+clients:
+  num_clients: 15  # Número total de clientes
+  honest_client_type: "standard"  # Tipo de cliente honesto (base, com defesas, etc.)
+  malicious_client_type: "label_flipping"  # Tipo de ataque malicioso (data_poisoning, model_poisoning, etc.)
+  malicious_percentage: 0.1  # Porcentagem de clientes maliciosos (0 para cenário base)

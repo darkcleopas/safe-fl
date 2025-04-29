@@ -35,5 +35,7 @@ class AggregationFactory:
             config = config or {}
             config['multi_krum'] = True
             return aggregation_strategies.KrumStrategy(config)
+        elif strategy_type == "CLUSTERING":
+            return aggregation_strategies.ClusteringStrategy(config)
         else:
             raise ValueError(f"Estratégia de agregação não reconhecida: {strategy_type}")

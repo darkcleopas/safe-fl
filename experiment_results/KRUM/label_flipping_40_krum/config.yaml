@@ -1,0 +1,28 @@
+clients:
+  honest_client_type: standard
+  malicious_client_type: label_flipping
+  malicious_percentage: 0.4
+  num_clients: 15
+dataset:
+  name: SIGN
+  non_iid: true
+experiment:
+  description: "Cen\xE1rio de defesa com Krum com 15 clientes e 40% de ataques de\
+    \ label flipping"
+  log_level: info
+  name: label_flipping_40_krum
+  output_dir: ./results
+  rounds: 500
+  seed: 42
+model:
+  batch_size: 32
+  local_epochs: 5
+  type: CNN_SIGN
+server:
+  address: 0.0.0.0:8000
+  aggregation_strategy: KRUM
+  evaluation_interval: 1
+  max_concurrent_clients: 3
+  selection_fraction: 0.4
+  selection_strategy: random
+  type: standard
