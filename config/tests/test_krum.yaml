@@ -6,7 +6,7 @@ experiment:
   description: "Cenário base de Federated Learning sem ataques ou defesas"
   seed: 42
   rounds: 2
-  output_dir: "./test_results"
+  output_dir: "./results/test_results"
   log_level: "info"
 
 # Configurações do dataset

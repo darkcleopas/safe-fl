@@ -2,11 +2,11 @@
 
 # Configurações gerais do experimento
 experiment:
-  name: "test_1"
+  name: "no_attack_fed_avg_all_clients"
   description: "Cenário base de Federated Learning sem ataques ou defesas"
   seed: 42
-  rounds: 2
-  output_dir: "./results/test_results"
+  rounds: 500
+  output_dir: "./results"
   log_level: "info"
 
 # Configurações do dataset
@@ -17,22 +17,22 @@ dataset:
 # Configurações do modelo
 model:
   type: "CNN_SIGN"  # Tipo de modelo (CNN_SIGN, DNN, VGG, GENERIC_MODEL)
-  local_epochs: 1
-  batch_size: 16
+  local_epochs: 5
+  batch_size: 32
 
 # Configurações do servidor (RSU)
 server:
   type: "standard"  # Tipo de servidor (base, com defesas, etc.)
   address: "0.0.0.0:8000"  # Endereço dentro da rede Docker
-  aggregation_strategy: "CLUSTERING"  # Estratégia de agregação
+  aggregation_strategy: "FED_AVG"  # Estratégia de agregação
   selection_strategy: "random"  # Estratégia de seleção de clientes
-  selection_fraction: 1  # Fração de clientes selecionados por round
+  selection_fraction: 1.0  # Fração de clientes selecionados por round
   evaluation_interval: 1  # Intervalo de avaliação do modelo global (em rounds)
-  max_concurrent_clients: 2  # Número máximo de clientes treinando simultaneamente
+  max_concurrent_clients: 3  # Número máximo de clientes treinando simultaneamente
 
 # Configurações dos clientes
 clients:
-  num_clients: 2  # Número total de clientes
+  num_clients: 15  # Número total de clientes
   honest_client_type: "standard"  # Tipo de cliente honesto (base, com defesas, etc.)
-  malicious_client_type: "label_flipping"  # Tipo de ataque malicioso (data_poisoning, model_poisoning, etc.)
-  malicious_percentage: 0.5  # Porcentagem de clientes maliciosos (0 para cenário base)
+  malicious_client_type: null  # Tipo de ataque malicioso (data_poisoning, model_poisoning, etc.)
+  malicious_percentage: 0.0  # Porcentagem de clientes maliciosos (0 para cenário base)
