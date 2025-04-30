@@ -1,3 +1,4 @@
+import os
 import threading
 import numpy as np
 from typing import Dict, List, Any, Tuple
@@ -37,24 +38,51 @@ class FLSimulator:
         # Setting up seed for reproducibility
         self.seed = self.experiment_config['seed']
         random.seed(self.seed)
-
-        # Configurar logging
-        self.setup_logging()
         
         # Initialize server
         self.server = self._create_server()
+
+        # Set the base directory
+        self.base_dir = self.server.base_dir
         
+        # Configurar logging
+        self.setup_logging()
+
         # Initialize clients
         self.clients = self._create_clients()
     
     def setup_logging(self):
         """Configura o sistema de logging."""
         log_level = self.experiment_config.get('log_level', 'info').upper()
+        
+        # Cria diretório de logs dentro do diretório de resultados        
+        self.logs_dir = os.path.join(self.base_dir, 'logs')
+        os.makedirs(self.logs_dir, exist_ok=True)
+        
+        # Configura o arquivo de log
+        log_file = os.path.join(self.logs_dir, 'simulator.log')
+        
+        # Configura o logger raiz
         logging.basicConfig(
             level=getattr(logging, log_level),
             format='%(asctime)s - %(name)s - %(levelname)s - %(message)s'
         )
+        
+        # Cria o logger para este componente
         self.logger = logging.getLogger("FLSimulator")
+        
+        # Cria manipulador de arquivo
+        file_handler = logging.FileHandler(log_file)
+        file_handler.setLevel(getattr(logging, log_level))
+        
+        # Cria formatador
+        formatter = logging.Formatter('%(asctime)s - %(name)s - %(levelname)s - %(message)s')
+        file_handler.setFormatter(formatter)
+        
+        # Adiciona o manipulador ao logger
+        self.logger.addHandler(file_handler)
+        
+        self.logger.info(f"Arquivo de log criado em {log_file}")
     
     def _create_server(self) -> FLServer:
         """Creates and initializes the server"""
@@ -91,7 +119,7 @@ class FLSimulator:
             except ImportError:
                 raise ImportError(f"Client type '{client_type}' not found")
             
-            client = FLClient(client_id, self.config)
+            client = FLClient(client_id, self.config, experiment_dir=self.base_dir)
             
             clients[client_id] = client
         

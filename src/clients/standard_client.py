@@ -18,7 +18,7 @@ class FLClient:
     """
     Cliente base para Federated Learning.
     """
-    def __init__(self, client_id: int, config: Dict[str, Any], server_url: str = None):
+    def __init__(self, client_id: int, config: Dict[str, Any], server_url: str = None, experiment_dir: str = None):
         """
         Inicializa o cliente com a configuração fornecida.
         
@@ -32,6 +32,7 @@ class FLClient:
         
         # Configurações de subseções
         self.experiment_config = config['experiment']
+        self.experiment_dir = experiment_dir
         self.model_config = config['model']
         self.dataset_config = config['dataset']
         self.clients_config = config['clients']
@@ -52,7 +53,7 @@ class FLClient:
         self.setup_logging()
         
         # Configurar recurso computacional
-        self.setup_resource()
+        # self.setup_resource()
         
         # Carregar dados
         self.load_data()
@@ -69,11 +70,40 @@ class FLClient:
     def setup_logging(self):
         """Configura o sistema de logging."""
         log_level = self.experiment_config.get('log_level', 'info').upper()
+        
+        # Configura o logger raiz
         logging.basicConfig(
             level=getattr(logging, log_level),
             format='%(asctime)s - %(name)s - %(levelname)s - %(message)s'
         )
+        
+        # Cria o logger para este componente
         self.logger = logging.getLogger(f"FLClient-{self.client_id}")
+        
+        # Se o servidor estiver disponível, podemos escrever no diretório de logs
+        if self.experiment_dir:
+            try:
+                # Cria diretório de logs para o cliente
+                logs_dir = os.path.join(self.experiment_dir, 'client_logs')
+                os.makedirs(logs_dir, exist_ok=True)
+                
+                # Configura o arquivo de log
+                log_file = os.path.join(logs_dir, f'client_{self.client_id}.log')
+                
+                # Cria manipulador de arquivo
+                file_handler = logging.FileHandler(log_file)
+                file_handler.setLevel(getattr(logging, log_level))
+                
+                # Cria formatador
+                formatter = logging.Formatter('%(asctime)s - %(name)s - %(levelname)s - %(message)s')
+                file_handler.setFormatter(formatter)
+                
+                # Adiciona o manipulador ao logger
+                self.logger.addHandler(file_handler)
+                
+                self.logger.info(f"Arquivo de log criado em {log_file}")
+            except Exception as e:
+                self.logger.warning(f"Não foi possível configurar o log em arquivo: {str(e)}")
     
     def setup_resource(self):
         """Define os recursos computacionais do cliente."""        

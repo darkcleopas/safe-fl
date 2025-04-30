@@ -1,5 +1,4 @@
 import numpy as np
-import logging
 from src.clients.standard_client import FLClient
 
 
@@ -9,7 +8,7 @@ class FLClient(FLClient):
     Herda do cliente padrão e modifica apenas os dados durante o carregamento.
     """
     
-    def __init__(self, client_id, config, server_url=None):
+    def __init__(self, client_id, config, server_url=None, experiment_dir=None):
         """
         Inicializa o cliente malicioso.
         
@@ -18,7 +17,7 @@ class FLClient(FLClient):
             config: Dicionário com a configuração do cliente
             server_url: URL do servidor FL
         """
-        super().__init__(client_id, config, server_url)
+        super().__init__(client_id, config, server_url, experiment_dir)
         self.logger.info(f"Cliente malicioso {client_id} (label_flipping) inicializado")
         
     def load_data(self):

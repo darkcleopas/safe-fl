@@ -52,20 +52,21 @@ class FLServer:
         tf.random.set_seed(self.seed)
         np.random.seed(self.seed)
         
-        # Configurar logging
-        self.setup_logging()
-        
         # Configurar diretório de saída
         self.run_log = datetime.datetime.now().strftime("%Y%m%d-%H%M%S")
+        self.folder_name = f"{self.experiment_config['name']}" + f"_{self.run_log}"
         self.base_dir = os.path.join(
             self.experiment_config.get('output_dir', './results'),
-            self.run_log
+            self.folder_name
         )
         os.makedirs(self.base_dir, exist_ok=True)
 
         # Configurar diretório de modelos intermediários
         self.intermediate_models_dir = os.path.join(self.base_dir, 'intermediate_models')
         os.makedirs(self.intermediate_models_dir, exist_ok=True)
+
+        # Configurar logging
+        self.setup_logging()
         
         # Salvar configuração
         self.save_config()
@@ -98,11 +99,35 @@ class FLServer:
     def setup_logging(self):
         """Configura o sistema de logging."""
         log_level = self.experiment_config.get('log_level', 'info').upper()
+        
+        # Cria diretório de logs dentro do diretório de resultados
+        self.logs_dir = os.path.join(self.base_dir, 'logs')
+        os.makedirs(self.logs_dir, exist_ok=True)
+        
+        # Configura o manipulador de arquivo
+        log_file = os.path.join(self.logs_dir, 'server.log')
+        
+        # Configura o logger raiz
         logging.basicConfig(
             level=getattr(logging, log_level),
             format='%(asctime)s - %(name)s - %(levelname)s - %(message)s'
         )
+        
+        # Cria o logger para este componente
         self.logger = logging.getLogger("FLServer")
+        
+        # Cria manipulador de arquivo
+        file_handler = logging.FileHandler(log_file)
+        file_handler.setLevel(getattr(logging, log_level))
+        
+        # Cria formatador
+        formatter = logging.Formatter('%(asctime)s - %(name)s - %(levelname)s - %(message)s')
+        file_handler.setFormatter(formatter)
+        
+        # Adiciona o manipulador ao logger
+        self.logger.addHandler(file_handler)
+        
+        self.logger.info(f"Arquivo de log criado em {log_file}")
     
     def save_config(self):
         """Salva a configuração atual em arquivo."""
