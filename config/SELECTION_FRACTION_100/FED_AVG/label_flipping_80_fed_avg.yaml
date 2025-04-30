@@ -8,6 +8,8 @@ experiment:
   rounds: 500
   output_dir: "./results"
   log_level: "info"
+  save_client_models: true  # Salvar modelos dos clientes após cada round
+  save_server_intermediate_models: false  # Salvar modelos intermediários do servidor
 
 # Configurações do dataset
 dataset:

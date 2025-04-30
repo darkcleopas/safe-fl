@@ -19,7 +19,7 @@ class FLServer:
     """
     Servidor base para Federated Learning.
     """
-    def __init__(self, config: Dict[str, Any]):
+    def __init__(self, config: Dict[str, Any], base_dir: str = None):
         """
         Inicializa o servidor com a configuração fornecida.
         
@@ -34,6 +34,20 @@ class FLServer:
         self.server_config = config['server']
         self.dataset_config = config['dataset']
         self.clients_config = config['clients']
+
+        # Configurar diretório de saída
+        if base_dir:
+            self.base_dir = base_dir
+        else:
+            self.run_log = datetime.datetime.now().strftime("%Y%m%d-%H%M%S")
+            self.folder_name = f"{self.experiment_config['name']}" + f"_{self.run_log}"
+            self.base_dir = os.path.join(
+                self.experiment_config.get('output_dir', './results'),
+                self.folder_name
+            )
+            os.makedirs(self.base_dir, exist_ok=True)
+
+        self.save_intermediate_server_models = self.experiment_config.get('save_intermediate_server_models', False)
 
         # Gerenciamento de clientes para controle de recursos
         self.max_concurrent_clients = config.get('server', {}).get('max_concurrent_clients', 2)
@@ -51,20 +65,12 @@ class FLServer:
         self.seed = self.experiment_config.get('seed', 42)
         tf.random.set_seed(self.seed)
         np.random.seed(self.seed)
-        
-        # Configurar diretório de saída
-        self.run_log = datetime.datetime.now().strftime("%Y%m%d-%H%M%S")
-        self.folder_name = f"{self.experiment_config['name']}" + f"_{self.run_log}"
-        self.base_dir = os.path.join(
-            self.experiment_config.get('output_dir', './results'),
-            self.folder_name
-        )
-        os.makedirs(self.base_dir, exist_ok=True)
 
         # Configurar diretório de modelos intermediários
-        self.intermediate_models_dir = os.path.join(self.base_dir, 'intermediate_models')
-        os.makedirs(self.intermediate_models_dir, exist_ok=True)
-
+        if self.save_intermediate_server_models:
+            self.intermediate_server_models_dir = os.path.join(self.base_dir, 'intermediate_server_models')
+            os.makedirs(self.intermediate_server_models_dir, exist_ok=True)
+        
         # Configurar logging
         self.setup_logging()
         
@@ -220,10 +226,11 @@ class FLServer:
         # Aplicar os novos pesos ao modelo global
         self.model.set_weights(aggregated_weights)
         
-        # Salvar o modelo global atualizado
-        global_model_path = f'{self.intermediate_models_dir}/model_global_round_{self.current_round}.h5'
-        self.model.save(global_model_path)
-        self.logger.info(f"Modelo global atualizado e salvo em {global_model_path}")
+        if self.save_intermediate_server_models:
+            # Salvar o modelo global atualizado
+            global_model_path = f'{self.intermediate_server_models_dir}/model_global_round_{self.current_round}.h5'
+            self.model.save(global_model_path)
+            self.logger.info(f"Modelo global atualizado e salvo em {global_model_path}")
         
         # except Exception as e:
         #     self.logger.error(f"Erro durante a agregação: {str(e)}")

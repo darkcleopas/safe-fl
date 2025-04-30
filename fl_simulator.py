@@ -1,3 +1,4 @@
+import datetime
 import os
 import threading
 import numpy as np
@@ -39,16 +40,28 @@ class FLSimulator:
         self.seed = self.experiment_config['seed']
         random.seed(self.seed)
         
-        # Initialize server
-        self.server = self._create_server()
+        # Configura diretório de saída
+        self.run_log = datetime.datetime.now().strftime("%Y%m%d-%H%M%S")
+        self.folder_name = f"{self.experiment_config['name']}" + f"_{self.run_log}"
+        self.base_dir = os.path.join(
+            self.experiment_config.get('output_dir', './results'),
+            self.folder_name
+        )
+        os.makedirs(self.base_dir, exist_ok=True)
 
-        # Set the base directory
-        self.base_dir = self.server.base_dir
-        
         # Configurar logging
         self.setup_logging()
 
-        # Initialize clients
+        self.save_client_models = self.experiment_config.get('save_client_models', False)
+        if self.save_client_models:
+            self.client_models_dir = os.path.join(self.base_dir, 'client_models')
+            os.makedirs(self.client_models_dir, exist_ok=True)
+            self.logger.info(f"Modelos de clientes serão salvos em {self.client_models_dir}")
+
+        # Inicializa o server
+        self.server = self._create_server()
+
+        # Inicializa os clients
         self.clients = self._create_clients()
     
     def setup_logging(self):
@@ -86,7 +99,7 @@ class FLSimulator:
     
     def _create_server(self) -> FLServer:
         """Creates and initializes the server"""
-        server = FLServer(self.config)
+        server = FLServer(self.config, self.base_dir)
         return server
     
     def _create_clients(self) -> Dict[int, BaseFLClient]:
@@ -122,6 +135,11 @@ class FLSimulator:
             client = FLClient(client_id, self.config, experiment_dir=self.base_dir)
             
             clients[client_id] = client
+
+            if self.save_client_models:
+                # Create a directory for the client model
+                client_model_dir = os.path.join(self.client_models_dir, f'client_{client_id}')
+                os.makedirs(client_model_dir, exist_ok=True)
         
         return clients
     
@@ -200,6 +218,20 @@ class FLSimulator:
 
                 # Armazenar atualização
                 self.server.round_updates[client_id] = (weights, num_examples, local_loss, local_accuracy)
+
+                # Salvar modelo do cliente se a flag estiver ativada
+                if self.save_client_models:
+                    try:
+                        # Salvar modelo
+                        client_model_dir = os.path.join(self.client_models_dir, f'client_{client_id}')
+                        model_path = os.path.join(client_model_dir, f'model_round_{self.server.current_round}.h5')
+                        client.model.save(model_path)
+                        self.logger.info(f"Modelo do cliente {client_id} (rodada {self.server.current_round}) salvo em {model_path}")
+                        
+                        # Limpar memória
+                        gc.collect()
+                    except Exception as e:
+                        self.logger.error(f"Erro ao salvar modelo do cliente {client_id}: {str(e)}")
 
                 # Armazenar métricas locais
                 if client_id not in self.server.metrics['local_losses']:

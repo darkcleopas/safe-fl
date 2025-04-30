@@ -84,7 +84,7 @@ class FLClient:
         if self.experiment_dir:
             try:
                 # Cria diretório de logs para o cliente
-                logs_dir = os.path.join(self.experiment_dir, 'client_logs')
+                logs_dir = os.path.join(self.experiment_dir, 'logs')
                 os.makedirs(logs_dir, exist_ok=True)
                 
                 # Configura o arquivo de log
