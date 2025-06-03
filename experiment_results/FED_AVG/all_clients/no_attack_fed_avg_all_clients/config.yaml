@@ -1,0 +1,29 @@
+clients:
+  honest_client_type: standard
+  malicious_client_type: null
+  malicious_percentage: 0.0
+  num_clients: 15
+dataset:
+  name: SIGN
+  non_iid: true
+experiment:
+  description: "Cen\xE1rio base de Federated Learning sem ataques ou defesas"
+  log_level: info
+  name: no_attack_fed_avg_all_clients
+  output_dir: ./results
+  rounds: 500
+  save_client_models: true
+  save_server_intermediate_models: false
+  seed: 42
+model:
+  batch_size: 32
+  local_epochs: 5
+  type: CNN_SIGN
+server:
+  address: 0.0.0.0:8000
+  aggregation_strategy: FED_AVG
+  evaluation_interval: 1
+  max_concurrent_clients: 3
+  selection_fraction: 1.0
+  selection_strategy: random
+  type: standard
