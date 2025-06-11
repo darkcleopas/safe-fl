@@ -9,6 +9,7 @@ from typing import List, Dict, Any, Tuple
 import base64
 import io
 import gc
+import inspect
 
 from src.utils.aggregation_factory import AggregationFactory
 from src.utils.dataset_factory import DatasetFactory
@@ -220,8 +221,21 @@ class FLServer:
             updates: Lista de tuplas (pesos_modelo, num_exemplos)
         """
         # try:
-        # Usar a estratégia de agregação configurada
-        aggregated_weights = self.aggregation_strategy.aggregate(updates)
+        # Obter os client_ids na ordem das atualizações
+        client_ids = list(self.round_updates.keys())
+        
+        # Verificar se a estratégia suporta client_ids
+        aggregate_signature = inspect.signature(self.aggregation_strategy.aggregate)
+        supports_client_ids = 'client_ids' in aggregate_signature.parameters
+        
+        if supports_client_ids:
+            # Usar a estratégia de agregação configurada com client_ids
+            self.logger.info(f"Usando agregação {self.aggregation_strategy.__class__.__name__} com client_ids: {client_ids}")
+            aggregated_weights = self.aggregation_strategy.aggregate(updates, client_ids=client_ids)
+        else:
+            # Fallback para estratégias que não suportam client_ids
+            self.logger.info(f"Usando agregação {self.aggregation_strategy.__class__.__name__}")
+            aggregated_weights = self.aggregation_strategy.aggregate(updates)
         
         # Aplicar os novos pesos ao modelo global
         self.model.set_weights(aggregated_weights)
@@ -231,13 +245,14 @@ class FLServer:
             global_model_path = f'{self.intermediate_server_models_dir}/model_global_round_{self.current_round}.h5'
             self.model.save(global_model_path)
             self.logger.info(f"Modelo global atualizado e salvo em {global_model_path}")
-        
+            
         # except Exception as e:
         #     self.logger.error(f"Erro durante a agregação: {str(e)}")
         #     self.logger.warning("Utilizando FedAvg como estratégia de fallback")
             
         #     # Fallback para FedAvg em caso de erro
-        #     fedavg_strategy = AggregationFactory.create_aggregation_strategy("FED_AVG")
+        #     from src.strategies.aggregation_strategies import FedAvgStrategy
+        #     fedavg_strategy = FedAvgStrategy()
         #     aggregated_weights = fedavg_strategy.aggregate(updates)
         #     self.model.set_weights(aggregated_weights)
     

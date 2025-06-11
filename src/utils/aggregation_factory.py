@@ -37,5 +37,7 @@ class AggregationFactory:
             return aggregation_strategies.KrumStrategy(config)
         elif strategy_type == "CLUSTERING":
             return aggregation_strategies.ClusteringStrategy(config)
+        elif strategy_type == "SIGNAL_ANALYSIS":
+            return aggregation_strategies.SignalAnalysisStrategy(config)
         else:
             raise ValueError(f"Estratégia de agregação não reconhecida: {strategy_type}")
