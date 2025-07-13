@@ -9,6 +9,7 @@ from scipy import stats
 from scipy.spatial.distance import cosine
 import logging
 from collections import defaultdict, deque
+from scipy.spatial.distance import cosine
 
 
 class AggregationStrategy(ABC):
@@ -529,53 +530,43 @@ class ClusteringStrategy(AggregationStrategy):
         return max(0, min(1, cosine_similarity))
 
 
-class SignalAnalysisStrategy(AggregationStrategy):
+class CosineSimilarityStrategy(AggregationStrategy):
     """
-    Estratégia de agregação baseada em análise de sinal e detecção de ruptura.
+    Estratégia de agregação baseada em similaridade coseno para detecção de ataques bizantinos.
     
-    Analisa a evolução dos pesos do modelo como sinais temporais e detecta
-    mudanças abruptas que podem indicar comportamento malicioso.
+    Detecta anomalias comparando a similaridade coseno entre pesos atuais e anteriores
+    de cada cliente. Clientes com baixa similaridade são considerados suspeitos.
     """
     
     def __init__(self, config: Dict[str, Any] = None):
         """
-        Inicializa a estratégia de análise de sinal.
+        Inicializa a estratégia de similaridade coseno.
         
         Args:
             config: Dicionário com configurações
-                window_size: Tamanho da janela para análise (padrão: 5)
-                sensitivity: Sensibilidade da detecção (padrão: 2.0)
-                min_rounds: Número mínimo de rounds para começar análise (padrão: 3)
-                signal_types: Lista de tipos de sinal a analisar (padrão: ['norm', 'cosine', 'entropy'])
+                threshold: Limiar de similaridade para detectar anomalias (padrão: 0.5)
+                min_rounds: Número mínimo de rounds para começar análise (padrão: 2)
                 fallback_strategy: Estratégia para usar após filtragem (padrão: 'FED_AVG')
         """
         super().__init__(config)
         
-        # Configurações
-        self.window_size = self.config.get('window_size', 5)
-        self.sensitivity = self.config.get('sensitivity', 2.0)
-        self.min_rounds = self.config.get('min_rounds', 3)
-        self.signal_types = self.config.get('signal_types', ['norm', 'cosine', 'entropy'])
+        # Configurações simplificadas
+        self.threshold = self.config.get('threshold', 0.5)  # Similaridade mínima esperada
+        self.min_rounds = self.config.get('min_rounds', 2)
         self.fallback_strategy = self.config.get('fallback_strategy', 'FED_AVG')
+        self.max_clients = self.config.get('max_clients', 1000)  # Limite de clientes no histórico
         
-        # Histórico de sinais por cliente
-        self.client_signal_history = defaultdict(lambda: defaultdict(list))
-        
-        # Histórico de pesos por cliente (para calcular similaridades)
-        self.client_weights_history = defaultdict(list)
-        
-        # Estatísticas globais para normalização
-        self.global_signal_stats = defaultdict(lambda: {'mean': 0, 'std': 1})
+        # Histórico apenas dos pesos anteriores por cliente
+        self.previous_weights = {}  # {client_id: last_weights}
         
         # Contador de rounds
         self.round_count = 0
         
-        self.logger.info(f"SignalAnalysisStrategy inicializada com window_size={self.window_size}, "
-                        f"sensitivity={self.sensitivity}, signal_types={self.signal_types}")
+        self.logger.info(f"CosineSimilarityStrategy inicializada com threshold={self.threshold}")
     
     def aggregate(self, updates: List[Tuple[List[np.ndarray], int]], client_ids: List[int] = None) -> List[np.ndarray]:
         """
-        Agrega os pesos usando análise de sinal e detecção de ruptura.
+        Agrega os pesos usando detecção de anomalias por similaridade coseno.
         
         Args:
             updates: Lista de tuplas (pesos_modelo, num_exemplos)
@@ -587,7 +578,7 @@ class SignalAnalysisStrategy(AggregationStrategy):
         self.validate_updates(updates)
         self.round_count += 1
         
-        # Se client_ids não fornecidos, usar índices sequenciais (fallback)
+        # Se client_ids não fornecidos, usar índices sequenciais
         if client_ids is None:
             client_ids = list(range(len(updates)))
             self.logger.warning("client_ids não fornecidos, usando índices sequenciais")
@@ -595,32 +586,32 @@ class SignalAnalysisStrategy(AggregationStrategy):
         if len(client_ids) != len(updates):
             raise ValueError(f"Número de client_ids ({len(client_ids)}) não corresponde ao número de updates ({len(updates)})")
         
-        self.logger.info(f"Iniciando análise de sinal para round {self.round_count} com clientes {client_ids}")
+        self.logger.info(f"Round {self.round_count}: analisando {len(updates)} clientes")
         
-        # Se temos poucos rounds, usar estratégia padrão
+        # Se temos poucos rounds, usar estratégia padrão sem análise
         if self.round_count < self.min_rounds:
             self.logger.info(f"Round {self.round_count} < {self.min_rounds}, usando FedAvg sem análise")
-            self._update_histories(updates, client_ids)
+            self._update_previous_weights(updates, client_ids)
             return FedAvgStrategy().aggregate(updates)
         
-        # Analisar sinais e detectar anomalias
-        clean_updates = self._filter_anomalous_updates(updates, client_ids)
+        # Filtrar atualizações suspeitas baseado em similaridade coseno
+        clean_updates = self._filter_by_cosine_similarity(updates, client_ids)
         
-        # Se nenhuma atualização passou no filtro, usar todas (evitar travamento)
+        # Se nenhuma atualização passou no filtro, usar todas (segurança)
         if not clean_updates:
             self.logger.warning("Nenhuma atualização passou no filtro, usando todas as atualizações")
             clean_updates = updates
         
-        # Atualizar históricos
-        self._update_histories(updates, client_ids)
+        # Atualizar histórico de pesos
+        self._update_previous_weights(updates, client_ids)
         
-        # Usar estratégia de fallback para agregação final
+        # Agregar usando estratégia de fallback
         self.logger.info(f"Agregando {len(clean_updates)} de {len(updates)} atualizações")
         return FedAvgStrategy().aggregate(clean_updates)
     
-    def _filter_anomalous_updates(self, updates: List[Tuple[List[np.ndarray], int]], client_ids: List[int]) -> List[Tuple[List[np.ndarray], int]]:
+    def _filter_by_cosine_similarity(self, updates: List[Tuple[List[np.ndarray], int]], client_ids: List[int]) -> List[Tuple[List[np.ndarray], int]]:
         """
-        Filtra atualizações anômalas baseado em análise de sinal.
+        Filtra atualizações baseado na similaridade coseno com pesos anteriores.
         
         Args:
             updates: Lista de atualizações
@@ -634,147 +625,75 @@ class SignalAnalysisStrategy(AggregationStrategy):
         for i, (weights, num_examples) in enumerate(updates):
             client_id = client_ids[i]
             
-            # Calcular sinais para esta atualização
-            signals = self._calculate_signals(weights, client_id)
-            
-            # Verificar se há anomalia
-            is_anomalous = self._detect_anomaly(signals, client_id)
-            
-            if not is_anomalous:
+            # Verificar se temos pesos anteriores para este cliente
+            if client_id not in self.previous_weights:
+                # Primeiro round para este cliente - aceitar
                 clean_updates.append((weights, num_examples))
-                self.logger.debug(f"Cliente {client_id}: ACEITO")
+                self.logger.debug(f"Cliente {client_id}: ACEITO (primeira atualização)")
+                continue
+            
+            # Calcular similaridade coseno
+            similarity = self._calculate_cosine_similarity(weights, self.previous_weights[client_id])
+            
+            # Verificar se está acima do threshold
+            if similarity >= self.threshold:
+                clean_updates.append((weights, num_examples))
+                self.logger.debug(f"Cliente {client_id}: ACEITO (similaridade={similarity:.3f})")
             else:
-                self.logger.warning(f"Cliente {client_id}: REJEITADO (anomalia detectada)")
+                self.logger.warning(f"Cliente {client_id}: REJEITADO (similaridade={similarity:.3f} < {self.threshold})")
         
         return clean_updates
     
-    def _calculate_signals(self, weights: List[np.ndarray], client_id: int) -> Dict[str, float]:
+    def _calculate_cosine_similarity(self, weights_current: List[np.ndarray], weights_previous: List[np.ndarray]) -> float:
         """
-        Calcula diferentes tipos de sinais a partir dos pesos do modelo.
+        Calcula a similaridade coseno entre pesos atuais e anteriores.
         
         Args:
-            weights: Pesos do modelo
-            client_id: ID do cliente
+            weights_current: Pesos atuais do modelo
+            weights_previous: Pesos anteriores do modelo
             
         Returns:
-            Dicionário com valores dos sinais
+            Valor de similaridade coseno entre 0 e 1 (1 = idênticos, 0 = ortogonais)
         """
-        signals = {}
-        
-        # Achatar todos os pesos em um único vetor
-        flattened_weights = np.concatenate([w.flatten() for w in weights])
-        
-        # 1. Norma L2 dos pesos
-        if 'norm' in self.signal_types:
-            signals['norm'] = np.linalg.norm(flattened_weights)
-        
-        # 2. Similaridade coseno com atualização anterior
-        if 'cosine' in self.signal_types and len(self.client_weights_history[client_id]) > 0:
-            previous_weights = self.client_weights_history[client_id][-1]
-            previous_flattened = np.concatenate([w.flatten() for w in previous_weights])
+        try:
+            # Achatar todos os pesos em vetores únicos
+            current_flat = np.concatenate([w.flatten() for w in weights_current])
+            previous_flat = np.concatenate([w.flatten() for w in weights_previous])
             
-            # Calcular distância coseno (1 - similaridade)
-            if np.linalg.norm(flattened_weights) > 0 and np.linalg.norm(previous_flattened) > 0:
-                cosine_sim = 1 - cosine(flattened_weights, previous_flattened)
-                signals['cosine'] = cosine_sim
-            else:
-                signals['cosine'] = 0.0
-        
-        # 3. Entropia dos pesos (proxy para diversidade)
-        if 'entropy' in self.signal_types:
-            # Normalizar pesos para [0, 1] e calcular entropia
-            normalized_weights = (flattened_weights - np.min(flattened_weights))
-            if np.max(normalized_weights) > 0:
-                normalized_weights = normalized_weights / np.max(normalized_weights)
+            # Verificar se os vetores têm o mesmo tamanho
+            if len(current_flat) != len(previous_flat):
+                self.logger.error("Tamanhos de vetores diferentes - usando similaridade = 0")
+                return 0.0
             
-            # Criar histograma e calcular entropia
-            hist, _ = np.histogram(normalized_weights, bins=50, density=True)
-            hist = hist[hist > 0]  # Remover bins vazios
-            if len(hist) > 0:
-                signals['entropy'] = -np.sum(hist * np.log(hist + 1e-10))
-            else:
-                signals['entropy'] = 0.0
-        
-        # 4. Magnitude do gradiente (mudança em relação ao peso anterior)
-        if 'gradient_magnitude' in self.signal_types and len(self.client_weights_history[client_id]) > 0:
-            previous_weights = self.client_weights_history[client_id][-1]
-            previous_flattened = np.concatenate([w.flatten() for w in previous_weights])
+            # Verificar se algum vetor é zero (evita divisão por zero)
+            if np.allclose(current_flat, 0) or np.allclose(previous_flat, 0):
+                self.logger.warning("Um dos vetores é zero - usando similaridade = 0.0")
+                return 0.0
             
-            gradient = flattened_weights - previous_flattened
-            signals['gradient_magnitude'] = np.linalg.norm(gradient)
-        
-        return signals
+            # Calcular similaridade coseno usando scipy
+            # cosine() retorna distância (1 - similaridade), então convertemos
+            cosine_distance = cosine(current_flat, previous_flat)
+            
+            # Verificar se o resultado é válido (pode ser NaN se vetores são zeros)
+            if np.isnan(cosine_distance):
+                self.logger.warning("Similaridade coseno resultou em NaN - usando 0.0")
+                return 0.0
+            
+            # Converter distância para similaridade
+            similarity = 1.0 - cosine_distance
+            
+            # Garantir que está no range [0, 1]
+            similarity = max(0.0, min(1.0, similarity))
+            
+            return similarity
+            
+        except Exception as e:
+            self.logger.error(f"Erro ao calcular similaridade coseno: {e}")
+            return 0.0  # Em caso de erro, considerar dissimilar
     
-    def _detect_anomaly(self, signals: Dict[str, float], client_id: int) -> bool:
+    def _update_previous_weights(self, updates: List[Tuple[List[np.ndarray], int]], client_ids: List[int]):
         """
-        Detecta se os sinais indicam comportamento anômalo.
-        
-        Args:
-            signals: Dicionário com valores dos sinais
-            client_id: ID do cliente
-            
-        Returns:
-            True se anomalia for detectada, False caso contrário
-        """
-        anomaly_scores = []
-        
-        for signal_type, value in signals.items():
-            score = self._calculate_anomaly_score(signal_type, value, client_id)
-            if score is not None:
-                anomaly_scores.append(score)
-        
-        if not anomaly_scores:
-            return False  # Sem dados suficientes
-        
-        # Combinar scores (média)
-        combined_score = np.mean(anomaly_scores)
-        
-        # Detectar anomalia baseado na sensibilidade
-        is_anomalous = combined_score > self.sensitivity
-        
-        self.logger.info(f"Cliente {client_id}: score={combined_score:.3f}, "
-                         f"threshold={self.sensitivity}, anomalous={is_anomalous}")
-        
-        return is_anomalous
-    
-    def _calculate_anomaly_score(self, signal_type: str, value: float, client_id: int) -> Optional[float]:
-        """
-        Calcula score de anomalia para um tipo específico de sinal.
-        
-        Args:
-            signal_type: Tipo do sinal
-            value: Valor atual do sinal
-            client_id: ID do cliente
-            
-        Returns:
-            Score de anomalia (None se dados insuficientes)
-        """
-        history = self.client_signal_history[client_id][signal_type]
-        
-        if len(history) < 2:
-            return None  # Dados insuficientes
-        
-        # Usar janela deslizante para calcular estatísticas
-        window_data = history[-self.window_size:] if len(history) >= self.window_size else history
-        
-        if len(window_data) < 2:
-            return None
-        
-        # Calcular estatísticas da janela
-        mean = np.mean(window_data)
-        std = np.std(window_data)
-        
-        if std == 0:
-            std = 1e-10  # Evitar divisão por zero
-        
-        # Z-score modificado (score de anomalia)
-        z_score = abs(value - mean) / std
-        
-        return z_score
-    
-    def _update_histories(self, updates: List[Tuple[List[np.ndarray], int]], client_ids: List[int]):
-        """
-        Atualiza históricos de sinais e pesos para todos os clientes.
+        Atualiza o histórico de pesos anteriores para todos os clientes.
         
         Args:
             updates: Lista de atualizações
@@ -783,50 +702,36 @@ class SignalAnalysisStrategy(AggregationStrategy):
         for i, (weights, _) in enumerate(updates):
             client_id = client_ids[i]
             
-            # Atualizar histórico de pesos
-            self.client_weights_history[client_id].append([w.copy() for w in weights])
+            # Armazenar cópia dos pesos atuais como "anteriores" para próximo round
+            self.previous_weights[client_id] = [w.copy() for w in weights]
+        
+        # Limitar número de clientes no histórico para evitar crescimento infinito
+        if len(self.previous_weights) > self.max_clients:
+            # Remove clientes mais antigos (estratégia FIFO simples)
+            # Em implementação real, poderia usar timestamp ou LRU
+            excess_clients = len(self.previous_weights) - self.max_clients
+            oldest_clients = list(self.previous_weights.keys())[:excess_clients]
             
-            # Manter apenas os últimos N pesos para economizar memória
-            max_history = self.window_size * 2
-            if len(self.client_weights_history[client_id]) > max_history:
-                self.client_weights_history[client_id] = self.client_weights_history[client_id][-max_history:]
+            for client_id in oldest_clients:
+                del self.previous_weights[client_id]
             
-            # Calcular e armazenar sinais
-            signals = self._calculate_signals(weights, client_id)
-            
-            for signal_type, value in signals.items():
-                self.client_signal_history[client_id][signal_type].append(value)
-                
-                # Manter apenas histórico limitado
-                if len(self.client_signal_history[client_id][signal_type]) > max_history:
-                    self.client_signal_history[client_id][signal_type] = \
-                        self.client_signal_history[client_id][signal_type][-max_history:]
+            self.logger.info(f"Removidos {excess_clients} clientes antigos do histórico")
     
-    def get_signal_statistics(self) -> Dict[str, Any]:
+    def get_statistics(self) -> Dict[str, Any]:
         """
-        Retorna estatísticas dos sinais para análise.
+        Retorna estatísticas da estratégia para análise.
         
         Returns:
-            Dicionário com estatísticas dos sinais
+            Dicionário com estatísticas
         """
         stats = {
+            'strategy': 'CosineSimilarity',
             'round_count': self.round_count,
-            'clients_analyzed': len(self.client_signal_history),
-            'signal_types': self.signal_types,
-            'client_histories': {}
+            'threshold': self.threshold,
+            'clients_tracked': len(self.previous_weights),
+            'min_rounds': self.min_rounds,
+            'max_clients': self.max_clients,
+            'fallback_strategy': self.fallback_strategy
         }
-        
-        for client_id, signals in self.client_signal_history.items():
-            stats['client_histories'][client_id] = {}
-            for signal_type, history in signals.items():
-                if history:
-                    stats['client_histories'][client_id][signal_type] = {
-                        'count': len(history),
-                        'mean': np.mean(history),
-                        'std': np.std(history),
-                        'min': np.min(history),
-                        'max': np.max(history),
-                        'last_values': history[-5:] if len(history) >= 5 else history
-                    }
         
         return stats

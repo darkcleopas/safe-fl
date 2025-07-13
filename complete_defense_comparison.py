@@ -37,11 +37,13 @@ class DefenseComparisonRunner:
         self.batch_size = 32
         self.save_client_models = False  # Salvar modelos dos clientes após cada round
         self.save_server_intermediate_models = False  # Salvar modelos intermediários do servidor
+
+        self.base_dir = Path(f'simulation_{datetime.now().strftime("%Y%m%d_%H%M%S")}')
         
         # Diretórios
-        self.config_dir = Path('config/defense_comparison')
-        self.results_dir = Path('results_defense_comparison')
-        self.plots_dir = Path('plots_defense_comparison')
+        self.config_dir = self.base_dir / 'config'
+        self.results_dir = self.base_dir / 'results'
+        self.plots_dir = self.base_dir / 'plots'
         
         # Criar diretórios
         self.config_dir.mkdir(parents=True, exist_ok=True)
@@ -333,6 +335,41 @@ class DefenseComparisonRunner:
         
         return new_results
     
+    def analyze_cost_metrics(self):
+        """Analisa métricas de custo a partir dos resultados."""
+        print("\n💰 Analisando métricas de custo...")
+
+        cost_summary = []
+
+        for exp_name, result in self.all_results.items():
+            if not result.get('success'):
+                continue
+
+            metrics = result.get('metrics', {})
+            communication = metrics.get('communication_bytes', [])
+            aggregation = metrics.get('aggregation_time', [])
+            round_time = metrics.get('round_time', [])
+            memory = metrics.get('memory_usage', [])
+
+            summary = {
+                'experiment': exp_name,
+                'defense': result['defense'],
+                'attack_rate': result['attack_rate'],
+                'selection_fraction': result['selection_fraction'],
+                'avg_comm_bytes': np.mean(communication) if communication else 0,
+                'avg_agg_time': np.mean(aggregation) if aggregation else 0,
+                'avg_round_time': np.mean(round_time) if round_time else 0,
+                'avg_memory': np.mean(memory) if memory else 0,
+            }
+            cost_summary.append(summary)
+
+        df_cost = pd.DataFrame(cost_summary)
+        cost_path = self.results_dir / 'cost_metrics_summary.csv'
+        df_cost.to_csv(cost_path, index=False)
+
+        print(f"✅ Métricas de custo salvas em: {cost_path}")
+        return df_cost
+    
     def analyze_breaking_points(self):
         """Analisa pontos de ruptura para cada defesa."""
         
@@ -581,6 +618,29 @@ class DefenseComparisonRunner:
         
         return True
     
+    def create_cost_plots(self, df_cost):
+        """Cria plots das métricas de custo."""
+        print("\n📉 Criando plots de custo...")
+
+        plt.figure(figsize=(16, 10))
+
+        metrics = ['avg_comm_bytes', 'avg_agg_time', 'avg_round_time', 'avg_memory']
+        titles = ['Bytes Transmitidos', 'Tempo de Agregação (s)', 'Tempo por Round (s)', 'Uso de Memória (MB)']
+
+        for i, metric in enumerate(metrics):
+            plt.subplot(2, 2, i+1)
+            sns.boxplot(data=df_cost, x='defense', y=metric)
+            plt.title(titles[i])
+            plt.xticks(rotation=45)
+            plt.grid(True, alpha=0.3)
+
+        plt.tight_layout()
+        cost_plot_path = self.plots_dir / 'cost_comparison.png'
+        plt.savefig(cost_plot_path, dpi=300, bbox_inches='tight')
+        plt.show()
+
+        print(f"✅ Plots de custo salvos em: {cost_plot_path}")
+
     def save_results_summary(self):
         """Salva resumo dos resultados."""
         
@@ -673,8 +733,12 @@ class DefenseComparisonRunner:
         
         # 10. Salvar resultados (dataset completo)
         results_path, csv_path = self.save_results_summary()
-        
-        # 11. Resumo final
+
+        # 11. Analisar métricas de custo
+        df_cost = self.analyze_cost_metrics()
+        self.create_cost_plots(df_cost)
+
+        # 12. Resumo final
         successful = sum(1 for r in self.all_results.values() if r.get('success', False))
         total_planned = len(all_configs)
         

@@ -10,6 +10,8 @@ import base64
 import io
 import gc
 import inspect
+import time
+import psutil
 
 from src.utils.aggregation_factory import AggregationFactory
 from src.utils.dataset_factory import DatasetFactory
@@ -78,10 +80,6 @@ class FLServer:
         # Salvar configuração
         self.save_config()
         
-        # Inicializar o modelo global
-        self.model = None
-        self.initialize_model()
-        
         # Métricas para acompanhamento
         self.metrics = {
             'rounds': [],
@@ -91,8 +89,19 @@ class FLServer:
             'num_examples': [],
             'local_losses': {},
             'local_accuracies': {},
-            'client_examples': {}
+            'client_examples': {},
+            'aggregation_time': [],  # Tempo de agregação por rodada
+            'round_time': [],  # Tempo total por rodada
+            'model_size_bytes': None,  # Tamanho do modelo em bytes
+            'num_parameters': None,  # Número de parâmetros
+            'communication_bytes': [],  # Bytes transmitidos por rodada
+            'client_submission_times': {},  # Tempo de submissão por cliente
+            'memory_usage': [],  # Uso de memória durante agregação
         }
+
+        # Inicializar o modelo global
+        self.model = None
+        self.initialize_model()
         
         # Estado da simulação
         self.current_round = 0
@@ -100,6 +109,8 @@ class FLServer:
         self.round_updates = {}  # Armazena atualizações por round
         self.selected_clients = []  # Clientes selecionados para o round atual
         self.training_complete = False # Indica se o treinamento foi concluído
+        self.round_start_time = None
+        self.client_start_times = {}
 
         self.logger.info(f"Servidor inicializado com sucesso usando estratégia de agregação {aggregation_strategy_type}")
     
@@ -171,7 +182,24 @@ class FLServer:
         initial_model_path = os.path.join(self.base_dir, 'model_initial.h5')
         self.model.save(initial_model_path)
         self.logger.info(f"Modelo inicial salvo em {initial_model_path}")
-    
+
+        # Calcular métricas do modelo
+        self.calculate_model_metrics()
+
+    def calculate_model_metrics(self):
+        """Calcula e armazena métricas sobre o modelo."""
+        # Número de parâmetros
+        self.metrics['num_parameters'] = self.model.count_params()
+        
+        # Tamanho em bytes (aproximado)
+        total_size = 0
+        for weight in self.model.get_weights():
+            total_size += weight.nbytes
+        self.metrics['model_size_bytes'] = total_size
+        
+        self.logger.info(f"Modelo tem {self.metrics['num_parameters']:,} parâmetros")
+        self.logger.info(f"Tamanho do modelo: {self.metrics['model_size_bytes']/1024/1024:.2f} MB")
+
     def select_clients(self, round_num: int, available_clients: List[int]) -> List[int]:
         """
         Seleciona os clientes para participar da rodada atual.
@@ -220,6 +248,14 @@ class FLServer:
         Args:
             updates: Lista de tuplas (pesos_modelo, num_exemplos)
         """
+
+        # Medir memória antes da agregação
+        process = psutil.Process(os.getpid())
+        memory_before = process.memory_info().rss / 1024 / 1024  # MB
+        
+        # Medir tempo de agregação
+        start_time = time.time()
+        
         # try:
         # Obter os client_ids na ordem das atualizações
         client_ids = list(self.round_updates.keys())
@@ -255,6 +291,18 @@ class FLServer:
         #     fedavg_strategy = FedAvgStrategy()
         #     aggregated_weights = fedavg_strategy.aggregate(updates)
         #     self.model.set_weights(aggregated_weights)
+
+        # Medir tempo e memória após agregação
+        aggregation_time = time.time() - start_time
+        memory_after = process.memory_info().rss / 1024 / 1024  # MB
+        memory_peak = memory_after - memory_before
+        
+        # Armazenar métricas
+        self.metrics['aggregation_time'].append(aggregation_time)
+        self.metrics['memory_usage'].append(memory_peak)
+
+        self.logger.info(f"Tempo de agregação: {aggregation_time:.3f}s")
+        self.logger.info(f"Pico de memória durante agregação: {memory_peak:.2f} MB")
     
     def evaluate_model(self) -> Dict[str, float]:
         """
@@ -332,6 +380,7 @@ class FLServer:
             Dicionário com informações da rodada
         """
         self.current_round += 1
+        self.round_start_time = time.time()
         self.logger.info(f"Iniciando rodada {self.current_round}/{self.total_rounds}")
         
         # Limpar atualizações da rodada anterior
@@ -378,6 +427,10 @@ class FLServer:
         Returns:
             Dicionário com status da submissão
         """
+        # Registrar tempo de início se for primeira submissão
+        if client_id not in self.client_start_times:
+            self.client_start_times[client_id] = time.time()
+            
         if client_id not in self.selected_clients:
             self.logger.warning(f"Cliente {client_id} não foi selecionado para esta rodada.")
             return {'status': 'rejected', 'reason': 'Client not selected for this round'}
@@ -385,6 +438,13 @@ class FLServer:
         if client_id in self.round_updates:
             self.logger.warning(f"Cliente {client_id} já enviou uma atualização para esta rodada.")
             return {'status': 'rejected', 'reason': 'Update already submitted for this round'}
+
+        # Tempo de submissão do cliente
+        submission_time = time.time() - self.client_start_times.get(client_id, time.time())
+
+        if client_id not in self.metrics['client_submission_times']:
+            self.metrics['client_submission_times'][client_id] = []
+        self.metrics['client_submission_times'][client_id].append(submission_time)
         
         # Desserializar pesos
         model_weights = self.deserialize_model_weights(weights)
@@ -433,6 +493,21 @@ class FLServer:
 
             # Limpar a memória após a agregação
             gc.collect()
+
+            # Calcular tempo total da rodada
+            round_time = time.time() - self.round_start_time
+            self.metrics['round_time'].append(round_time)
+            
+            # Calcular comunicação total da rodada
+            # (2x porque enviamos e recebemos modelos)
+            comm_bytes = 2 * self.metrics['model_size_bytes'] * len(self.selected_clients)
+            self.metrics['communication_bytes'].append(comm_bytes)
+            
+            self.logger.info(f"Tempo total da rodada: {round_time:.2f}s")
+            self.logger.info(f"Comunicação total: {comm_bytes/1024/1024:.2f} MB")
+            
+            # Limpar timers para próxima rodada
+            self.client_start_times.clear()
             
             # Avaliar modelo se necessário
             if self.current_round % self.server_config['evaluation_interval'] == 0:
