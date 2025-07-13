@@ -26,8 +26,8 @@ class DefenseComparisonRunner:
     """Runner para comparação completa de defesas."""
     
     def __init__(self):
-        self.defenses = ['FED_AVG', 'TRIMMED_MEAN', 'KRUM', 'MULTI_KRUM', 'CLUSTERING']
-        self.attack_rates = [0.0, 0.1, 0.2, 0.4, 0.6, 0.8]
+        self.defenses = ['FED_AVG', 'TRIMMED_MEAN', 'KRUM', 'MULTI_KRUM', 'CLUSTERING', 'COSINE_SIMILARITY']
+        self.attack_rates = [0.0, 0.2, 0.4, 0.6, 0.8]
         self.selection_fractions = [0.4, 1.0]
         
         # Configurações fixas
@@ -37,7 +37,7 @@ class DefenseComparisonRunner:
         self.batch_size = 32
         self.save_client_models = False  # Salvar modelos dos clientes após cada round
         self.save_server_intermediate_models = False  # Salvar modelos intermediários do servidor
-
+        
         # Diretórios
         self.config_dir = Path('config/defense_comparison')
         self.results_dir = Path('results_defense_comparison')
@@ -50,6 +50,7 @@ class DefenseComparisonRunner:
         
         # Armazenar resultados
         self.all_results = {}
+        self.existing_results = {}
         
     def create_config(self, defense, attack_rate, selection_fraction):
         """Cria configuração para um experimento específico."""
@@ -99,8 +100,126 @@ class DefenseComparisonRunner:
         # Configurações específicas por defesa
         if defense == 'TRIMMED_MEAN':
             config['server']['trim_ratio'] = 0.4
+        elif defense == 'COSINE_SIMILARITY':
+            config['server'].update({
+                'min_rounds': 5,
+                'threshold': 0.5,
+                'fallback_strategy': 'FED_AVG'
+            })
         
         return config, exp_name
+    
+    def load_existing_results(self):
+        """Carrega resultados existentes do diretório de resultados."""
+        
+        print("📊 Verificando experimentos já concluídos...")
+        
+        # Verificar se arquivo de resultados completos existe
+        results_file = self.results_dir / 'complete_results.json'
+        if results_file.exists():
+            try:
+                with open(results_file, 'r') as f:
+                    data = json.load(f)
+                    if 'results' in data:
+                        self.existing_results = data['results']
+                        print(f"✅ Carregados {len(self.existing_results)} experimentos existentes")
+                        return self.existing_results
+            except Exception as e:
+                print(f"⚠️ Erro ao carregar arquivo de resultados: {e}")
+        
+        # Fallback: buscar por pastas individuais de experimentos
+        existing_count = 0
+        for exp_dir in self.results_dir.iterdir():
+            if exp_dir.is_dir():
+                metrics_file = exp_dir / 'metrics.json'
+                config_file = exp_dir / 'config.yaml'
+                
+                if metrics_file.exists() and config_file.exists():
+                    try:
+                        # Carregar métricas
+                        with open(metrics_file, 'r') as f:
+                            metrics = json.load(f)
+                        
+                        # Carregar configuração
+                        with open(config_file, 'r') as f:
+                            config = yaml.safe_load(f)
+                        
+                        # Extrair informações
+                        exp_name = exp_dir.name
+                        malicious_pct = config.get('clients', {}).get('malicious_percentage', 0.0)
+                        selection_frac = config.get('server', {}).get('selection_fraction', 0.4)
+                        defense = config.get('server', {}).get('aggregation_strategy', 'UNKNOWN')
+                        
+                        self.existing_results[exp_name] = {
+                            'config_path': str(config_file),
+                            'defense': defense,
+                            'attack_rate': malicious_pct,
+                            'selection_fraction': selection_frac,
+                            'metrics': metrics,
+                            'final_accuracy': metrics['accuracy'][-1] if metrics.get('accuracy') else 0.0,
+                            'final_loss': metrics['loss'][-1] if metrics.get('loss') else float('inf'),
+                            'convergence_rounds': len(metrics.get('accuracy', [])),
+                            'success': True
+                        }
+                        existing_count += 1
+                        
+                    except Exception as e:
+                        print(f"⚠️ Erro ao processar {exp_dir.name}: {e}")
+        
+        if existing_count > 0:
+            print(f"✅ Encontrados {existing_count} experimentos através de busca por diretórios")
+        else:
+            print("📝 Nenhum experimento existente encontrado - começando do zero")
+        
+        return self.existing_results
+    
+    def filter_pending_configs(self, all_configs):
+        """Filtra configurações que ainda precisam ser executadas."""
+        
+        existing_experiments = set(self.existing_results.keys())
+        planned_experiments = set(all_configs.keys())
+        
+        # Experimentos que ainda precisam ser executados
+        pending_experiments = planned_experiments - existing_experiments
+        
+        # Filtrar configurações pendentes
+        pending_configs = {exp_name: all_configs[exp_name] 
+                          for exp_name in pending_experiments}
+        
+        print(f"📈 Status dos experimentos:")
+        print(f"  ✅ Já concluídos: {len(existing_experiments)}")
+        print(f"  📝 Planejados: {len(planned_experiments)}")
+        print(f"  ⏳ Pendentes: {len(pending_configs)}")
+        
+        if pending_configs:
+            print(f"\n📋 Experimentos pendentes:")
+            pending_by_defense = {}
+            for exp_name, config_info in pending_configs.items():
+                defense = config_info['defense']
+                if defense not in pending_by_defense:
+                    pending_by_defense[defense] = 0
+                pending_by_defense[defense] += 1
+            
+            for defense, count in pending_by_defense.items():
+                print(f"  🛡️ {defense}: {count} experimentos")
+        
+        return pending_configs
+    
+    def merge_results(self, new_results):
+        """Mescla resultados existentes com novos resultados."""
+        
+        # Começar com resultados existentes
+        merged_results = self.existing_results.copy()
+        
+        # Adicionar novos resultados
+        merged_results.update(new_results)
+        
+        print(f"🔄 Mesclando resultados:")
+        print(f"  📊 Existentes: {len(self.existing_results)}")
+        print(f"  🆕 Novos: {len(new_results)}")
+        print(f"  📈 Total: {len(merged_results)}")
+        
+        return merged_results
     
     def generate_all_configs(self):
         """Gera todas as configurações necessárias."""
@@ -157,13 +276,18 @@ class DefenseComparisonRunner:
         return total_time
     
     def run_experiments(self, configs):
-        """Executa todos os experimentos."""
+        """Executa apenas os experimentos pendentes."""
+        
+        if not configs:
+            print("✅ Todos os experimentos já foram concluídos!")
+            return {}
         
         start_time = time.time()
         completed = 0
         total = len(configs)
+        new_results = {}
         
-        print(f"\n🚀 Iniciando {total} experimentos...")
+        print(f"\n🚀 Iniciando {total} experimentos pendentes...")
         
         for exp_name, config_info in configs.items():
             print(f"\n{'='*60}")
@@ -176,7 +300,7 @@ class DefenseComparisonRunner:
                 metrics = simulator.run_simulation()
                 
                 # Armazenar resultado
-                self.all_results[exp_name] = {
+                new_results[exp_name] = {
                     **config_info,
                     'metrics': metrics,
                     'final_accuracy': metrics['accuracy'][-1] if metrics['accuracy'] else 0.0,
@@ -190,13 +314,13 @@ class DefenseComparisonRunner:
                 avg_time = elapsed / completed
                 remaining = (total - completed) * avg_time
                 
-                print(f"✅ Concluído! Acurácia final: {self.all_results[exp_name]['final_accuracy']:.4f}")
+                print(f"✅ Concluído! Acurácia final: {new_results[exp_name]['final_accuracy']:.4f}")
                 print(f"⏱️ Progresso: {completed}/{total} ({100*completed/total:.1f}%)")
                 print(f"🕐 Tempo restante estimado: {remaining/3600:.1f}h")
                 
             except Exception as e:
                 print(f"❌ Erro: {e}")
-                self.all_results[exp_name] = {
+                new_results[exp_name] = {
                     **config_info,
                     'error': str(e),
                     'success': False
@@ -204,10 +328,10 @@ class DefenseComparisonRunner:
                 completed += 1
         
         total_time = time.time() - start_time
-        print(f"\n🎉 Todos os experimentos concluídos!")
+        print(f"\n🎉 Experimentos pendentes concluídos!")
         print(f"⏱️ Tempo total: {total_time/3600:.2f} horas")
         
-        return self.all_results
+        return new_results
     
     def analyze_breaking_points(self):
         """Analisa pontos de ruptura para cada defesa."""
@@ -363,8 +487,99 @@ class DefenseComparisonRunner:
         plt.show()
         
         print(f"✅ Plot salvo em: {plot_path}")
+
+        # Criar plots de evolução temporal
+        self.create_temporal_evolution_plots()
         
         return str(plot_path)
+    
+    def create_temporal_evolution_plots(self):
+        """Cria plots de evolução temporal da acurácia ao longo dos rounds."""
+        
+        print("\n📈 Criando plots de evolução temporal...")
+        
+        # Obter taxas de ataque únicas dos resultados (não usar constantes)
+        available_attack_rates = set()
+        for result in self.all_results.values():
+            if result.get('success', False):
+                available_attack_rates.add(result['attack_rate'])
+        
+        available_attack_rates = sorted(list(available_attack_rates))
+        print(f"📊 Taxas de ataque encontradas: {[int(r*100) for r in available_attack_rates]}%")
+        
+        # Para cada fração de seleção, criar uma figura
+        for selection_fraction in self.selection_fractions:
+            selection_name = "100%" if selection_fraction == 1.0 else f"{int(selection_fraction*100)}%"
+            
+            # Configurar subplots baseado no número de taxas de ataque disponíveis
+            n_attacks = len(available_attack_rates)
+            cols = 3 if n_attacks > 3 else n_attacks
+            rows = (n_attacks + cols - 1) // cols  # Ceil division
+            
+            fig, axes = plt.subplots(rows, cols, figsize=(5*cols, 4*rows))
+            if rows == 1 and cols == 1:
+                axes = [axes]
+            elif rows == 1 or cols == 1:
+                axes = axes.flatten() if hasattr(axes, 'flatten') else [axes]
+            else:
+                axes = axes.flatten()
+            
+            # Garantir que temos axes suficientes
+            while len(axes) < n_attacks:
+                axes.append(None)
+            
+            plot_count = 0
+            
+            for attack_rate in available_attack_rates:
+                if plot_count >= len(axes) or axes[plot_count] is None:
+                    break
+                    
+                ax = axes[plot_count]
+                attack_name = "Sem Ataque" if attack_rate == 0.0 else f"{int(attack_rate*100)}% Atacantes"
+                
+                # Plotar cada defesa
+                for defense in self.defenses:
+                    line_style = '--' if defense == 'FED_AVG' else '-'
+                    # Buscar experimento correspondente
+                    attack_exp_name = "no_attack" if attack_rate == 0.0 else f"label_flipping_{int(attack_rate*100)}"
+                    selection_exp_name = "all_clients" if selection_fraction == 1.0 else f"sel_{int(selection_fraction*100)}"
+                    exp_name = f"{attack_exp_name}_{defense.lower()}_{selection_exp_name}"
+                    
+                    if exp_name in self.all_results and self.all_results[exp_name].get('success', False):
+                        metrics = self.all_results[exp_name]['metrics']
+                        rounds = metrics.get('rounds', [])
+                        accuracies = metrics.get('accuracy', [])
+                        
+                        if rounds and accuracies:
+                            ax.plot(rounds, accuracies, line_style, label=defense, 
+                                   linewidth=2, markersize=4, alpha=0.8)
+                
+                ax.set_xlabel('Round')
+                ax.set_ylabel('Acurácia')
+                ax.set_title(attack_name)
+                ax.legend(fontsize=8)
+                ax.grid(True, alpha=0.3)
+                ax.set_ylim(0, 1)
+                
+                plot_count += 1
+            
+            # Ocultar subplots não utilizados
+            for i in range(plot_count, len(axes)):
+                if axes[i] is not None:
+                    axes[i].set_visible(False)
+            
+            plt.suptitle(f'Evolução da Acurácia ao Longo dos Rounds (Seleção {selection_name})', 
+                        fontsize=14, y=0.98)
+            plt.tight_layout()
+            
+            # Salvar figura
+            temporal_plot_path = self.plots_dir / f'temporal_evolution_selection_{int(selection_fraction*100)}.png'
+            plt.savefig(temporal_plot_path, dpi=300, bbox_inches='tight')
+            plt.show()
+            
+            print(f"✅ Plot temporal (seleção {selection_name}) salvo em: {temporal_plot_path}")
+        
+        return True
     
     def save_results_summary(self):
         """Salva resumo dos resultados."""
@@ -411,43 +626,66 @@ class DefenseComparisonRunner:
         return results_path, csv_path
     
     def run_complete_analysis(self):
-        """Executa análise completa."""
+        """Executa análise completa com suporte incremental."""
         
         print("🔬 ANÁLISE COMPLETA DE DEFESAS EM FEDERATED LEARNING")
         print("="*60)
         
-        # 1. Gerar configurações
-        configs = self.generate_all_configs()
+        # 1. Carregar resultados existentes
+        self.load_existing_results()
         
-        # 2. Estimar tempo
-        self.estimate_time(configs)
+        # 2. Gerar todas as configurações (incluindo novas defesas)
+        all_configs = self.generate_all_configs()
         
-        # 3. Confirmar execução
-        response = input("\n❓ Continuar com os experimentos? (y/N): ").lower()
-        if response != 'y':
-            print("❌ Execução cancelada.")
-            return
+        # 3. Filtrar apenas configurações pendentes
+        pending_configs = self.filter_pending_configs(all_configs)
         
-        # 4. Executar experimentos
-        results = self.run_experiments(configs)
+        # 4. Estimar tempo apenas para experimentos pendentes
+        self.estimate_time(pending_configs)
         
-        # 5. Analisar pontos de ruptura
+        # 5. Confirmar execução (só se houver experimentos pendentes)
+        if pending_configs:
+            response = input(f"\n❓ Continuar com {len(pending_configs)} experimentos pendentes? (y/N): ").lower()
+            if response != 'y':
+                print("❌ Execução cancelada.")
+                # Ainda podemos fazer análise dos resultados existentes
+                if self.existing_results:
+                    print("📊 Fazendo análise apenas dos resultados existentes...")
+                    self.all_results = self.existing_results
+                else:
+                    return
+        
+        # 6. Executar apenas experimentos pendentes
+        if pending_configs:
+            new_results = self.run_experiments(pending_configs)
+            
+            # 7. Mesclar resultados existentes + novos
+            self.all_results = self.merge_results(new_results)
+        else:
+            # Usar apenas resultados existentes
+            self.all_results = self.existing_results
+        
+        # 8. Analisar pontos de ruptura (dataset completo)
         breaking_points = self.analyze_breaking_points()
         
-        # 6. Criar plots
+        # 9. Criar plots (dataset completo)
         plot_path = self.create_comparison_plots()
         
-        # 7. Salvar resultados
+        # 10. Salvar resultados (dataset completo)
         results_path, csv_path = self.save_results_summary()
         
-        # 8. Resumo final
-        successful = sum(1 for r in results.values() if r['success'])
-        print(f"\n🎉 ANÁLISE CONCLUÍDA!")
-        print(f"✅ {successful}/{len(results)} experimentos bem-sucedidos")
-        print(f"📊 Plots salvos em: {plot_path}")
-        print(f"💾 Resultados em: {results_path}")
+        # 11. Resumo final
+        successful = sum(1 for r in self.all_results.values() if r.get('success', False))
+        total_planned = len(all_configs)
         
-        return results, breaking_points
+        print(f"\n🎉 ANÁLISE CONCLUÍDA!")
+        print(f"✅ {successful}/{total_planned} experimentos bem-sucedidos")
+        if pending_configs:
+            print(f"🆕 {len(new_results)} novos experimentos executados")
+        print(f"📊 Plots com dataset completo salvos em: {plot_path}")
+        print(f"💾 Resultados completos em: {results_path}")
+        
+        return self.all_results, breaking_points
 
 
 def main():
