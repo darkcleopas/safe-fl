@@ -44,20 +44,25 @@ class ModelFactory:
         """
         model = tf.keras.Sequential()
         model.add(tf.keras.layers.Conv2D(filters=32, kernel_size=(5,5), activation='relu', input_shape=input_shape[1:]))
+        model.add(tf.keras.layers.BatchNormalization())
         model.add(tf.keras.layers.Conv2D(filters=32, kernel_size=(5,5), activation='relu'))
+        model.add(tf.keras.layers.BatchNormalization())
         model.add(tf.keras.layers.MaxPool2D(pool_size=(2, 2)))
         model.add(tf.keras.layers.Dropout(rate=0.25))
         model.add(tf.keras.layers.Conv2D(filters=64, kernel_size=(3, 3), activation='relu'))
+        model.add(tf.keras.layers.BatchNormalization())
         model.add(tf.keras.layers.Conv2D(filters=64, kernel_size=(3, 3), activation='relu'))
+        model.add(tf.keras.layers.BatchNormalization())
         model.add(tf.keras.layers.MaxPool2D(pool_size=(2, 2)))
         model.add(tf.keras.layers.Dropout(rate=0.25))
         model.add(tf.keras.layers.Flatten())
         model.add(tf.keras.layers.Dense(256, activation='relu'))
+        model.add(tf.keras.layers.BatchNormalization())
         model.add(tf.keras.layers.Dropout(rate=0.5))
         model.add(tf.keras.layers.Dense(num_classes, activation='softmax'))
 
         # Compilation of the model
-        model.compile(optimizer=tf.keras.optimizers.Adam(learning_rate=1e-5), loss='categorical_crossentropy', metrics=['accuracy'])
+        model.compile(optimizer=tf.keras.optimizers.Adam(learning_rate=1e-4), loss='categorical_crossentropy', metrics=['accuracy'])
         
         return model
     

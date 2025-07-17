@@ -27,7 +27,7 @@ class AggregationStrategy(ABC):
             config: Dicionário com configurações específicas da estratégia
         """
         self.config = config or {}
-        self.logger = logging.getLogger(self.__class__.__name__)
+        self.logger = logging.getLogger("FLServer")
     
     @abstractmethod
     def aggregate(self, updates: List[Tuple[List[np.ndarray], int]], client_ids: Optional[List[int]] = None) -> List[np.ndarray]:
@@ -599,7 +599,7 @@ class CosineSimilarityStrategy(AggregationStrategy):
         
         # Se nenhuma atualização passou no filtro, usar todas (segurança)
         if not clean_updates:
-            self.logger.warning("Nenhuma atualização passou no filtro, usando todas as atualizações")
+            self.logger.info("Nenhuma atualização passou no filtro, usando todas as atualizações")
             clean_updates = updates
         
         # Atualizar histórico de pesos
@@ -629,7 +629,7 @@ class CosineSimilarityStrategy(AggregationStrategy):
             if client_id not in self.previous_weights:
                 # Primeiro round para este cliente - aceitar
                 clean_updates.append((weights, num_examples))
-                self.logger.debug(f"Cliente {client_id}: ACEITO (primeira atualização)")
+                self.logger.info(f"Cliente {client_id}: ACEITO (primeira atualização)")
                 continue
             
             # Calcular similaridade coseno
@@ -638,9 +638,9 @@ class CosineSimilarityStrategy(AggregationStrategy):
             # Verificar se está acima do threshold
             if similarity >= self.threshold:
                 clean_updates.append((weights, num_examples))
-                self.logger.debug(f"Cliente {client_id}: ACEITO (similaridade={similarity:.3f})")
+                self.logger.info(f"Cliente {client_id}: ACEITO (similaridade={similarity:.3f})")
             else:
-                self.logger.warning(f"Cliente {client_id}: REJEITADO (similaridade={similarity:.3f} < {self.threshold})")
+                self.logger.info(f"Cliente {client_id}: REJEITADO (similaridade={similarity:.3f} < {self.threshold})")
         
         return clean_updates
     
