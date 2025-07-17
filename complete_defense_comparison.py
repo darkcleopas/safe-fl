@@ -26,15 +26,15 @@ class DefenseComparisonRunner:
     """Runner para comparação completa de defesas."""
     
     def __init__(self):
-        self.defenses = ['FED_AVG', 'TRIMMED_MEAN', 'KRUM', 'MULTI_KRUM', 'CLUSTERING', 'COSINE_SIMILARITY']
+        self.defenses = ['COSINE_SIMILARITY', 'FED_AVG', 'TRIMMED_MEAN', 'KRUM', 'MULTI_KRUM', 'CLUSTERING']
         self.attack_rates = [0.0, 0.2, 0.4, 0.6, 0.8]
         self.selection_fractions = [0.4, 1.0]
         
         # Configurações fixas
-        self.rounds = 100
+        self.rounds = 50
         self.num_clients = 15
-        self.local_epochs = 5
-        self.batch_size = 32
+        self.local_epochs = 3
+        self.batch_size = 64
         self.save_client_models = False  # Salvar modelos dos clientes após cada round
         self.save_server_intermediate_models = False  # Salvar modelos intermediários do servidor
 
@@ -104,8 +104,8 @@ class DefenseComparisonRunner:
             config['server']['trim_ratio'] = 0.4
         elif defense == 'COSINE_SIMILARITY':
             config['server'].update({
-                'min_rounds': 5,
-                'threshold': 0.5,
+                'min_rounds': 10,
+                'threshold': 0.4,
                 'fallback_strategy': 'FED_AVG'
             })
         
@@ -255,7 +255,7 @@ class DefenseComparisonRunner:
         """Estima tempo total baseado em experiência anterior."""
         
         # Estimativas baseadas no número de rounds (linear)
-        base_time_per_round = 8  # segundos por round (estimativa conservadora)
+        base_time_per_round = 6  # segundos por round (estimativa conservadora)
         time_per_round = 0
         num_clients_over_selection = [int(self.num_clients * s) for s in self.selection_fractions]
         for num_clients in num_clients_over_selection:
