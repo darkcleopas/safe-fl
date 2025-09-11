@@ -532,189 +532,181 @@ class ClusteringStrategy(AggregationStrategy):
 
 class CosineSimilarityStrategy(AggregationStrategy):
     """
-    Estratégia de agregação baseada em similaridade coseno para detecção de ataques bizantinos.
-    
-    Detecta anomalias comparando a similaridade coseno entre pesos atuais e anteriores
-    de cada cliente. Clientes com baixa similaridade são considerados suspeitos.
+    Estratégia de agregação baseada em análise vetorial para detecção de ataques bizantinos.
+
+    Detecta anomalias comparando:
+        1. A direção (dot product) com a média global do round anterior.
+        2. A distância euclidiana (L2) com a média global e pares.
     """
-    
+
     def __init__(self, config: Dict[str, Any] = None):
-        """
-        Inicializa a estratégia de similaridade coseno.
-        
-        Args:
-            config: Dicionário com configurações
-                threshold: Limiar de similaridade para detectar anomalias (padrão: 0.5)
-                min_rounds: Número mínimo de rounds para começar análise (padrão: 2)
-                fallback_strategy: Estratégia para usar após filtragem (padrão: 'FED_AVG')
-        """
         super().__init__(config)
-        
-        # Configurações simplificadas
-        self.threshold = self.config.get('threshold', 0.5)  # Similaridade mínima esperada
-        self.min_rounds = self.config.get('min_rounds', 2)
+
+        self.l2_threshold_global = self.config.get('l2_threshold_global', 1.0)
+        self.l2_threshold_peers = self.config.get('l2_threshold_peers', 1.0)
+        self.min_rounds = self.config.get('min_rounds', 5)
         self.fallback_strategy = self.config.get('fallback_strategy', 'FED_AVG')
-        self.max_clients = self.config.get('max_clients', 1000)  # Limite de clientes no histórico
-        
-        # Histórico apenas dos pesos anteriores por cliente
-        self.previous_weights = {}  # {client_id: last_weights}
-        
-        # Contador de rounds
+        self.max_clients = self.config.get('max_clients', 1000)
+
+        self.previous_weights = {}
+        self.previous_global_weights = None
         self.round_count = 0
-        
-        self.logger.info(f"CosineSimilarityStrategy inicializada com threshold={self.threshold}")
-    
+
+        self.logger.info(
+            f"CosineSimilarityStrategy inicializada com l2_threshold_global={self.l2_threshold_global}, "
+            f"l2_threshold_peers={self.l2_threshold_peers}"
+        )
+
     def aggregate(self, updates: List[Tuple[List[np.ndarray], int]], client_ids: List[int] = None) -> List[np.ndarray]:
-        """
-        Agrega os pesos usando detecção de anomalias por similaridade coseno.
-        
-        Args:
-            updates: Lista de tuplas (pesos_modelo, num_exemplos)
-            client_ids: Lista de IDs dos clientes correspondente aos updates
-            
-        Returns:
-            Lista de arrays numpy com os pesos agregados
-        """
         self.validate_updates(updates)
         self.round_count += 1
-        
-        # Se client_ids não fornecidos, usar índices sequenciais
+
         if client_ids is None:
             client_ids = list(range(len(updates)))
             self.logger.warning("client_ids não fornecidos, usando índices sequenciais")
-        
+
         if len(client_ids) != len(updates):
             raise ValueError(f"Número de client_ids ({len(client_ids)}) não corresponde ao número de updates ({len(updates)})")
-        
+
         self.logger.info(f"Round {self.round_count}: analisando {len(updates)} clientes")
-        
-        # Se temos poucos rounds, usar estratégia padrão sem análise
+
         if self.round_count < self.min_rounds:
             self.logger.info(f"Round {self.round_count} < {self.min_rounds}, usando FedAvg sem análise")
             self._update_previous_weights(updates, client_ids)
-            return FedAvgStrategy().aggregate(updates)
-        
-        # Filtrar atualizações suspeitas baseado em similaridade coseno
-        clean_updates = self._filter_by_cosine_similarity(updates, client_ids)
-        
-        # Se nenhuma atualização passou no filtro, usar todas (segurança)
+            self.previous_global_weights = FedAvgStrategy().aggregate(updates)
+            return self.previous_global_weights
+
+        clean_updates = self._filter_by_l2_and_direction(updates, client_ids)
+
         if not clean_updates:
             self.logger.info("Nenhuma atualização passou no filtro, usando todas as atualizações")
             clean_updates = updates
-        
-        # Atualizar histórico de pesos
+
         self._update_previous_weights(updates, client_ids)
-        
-        # Agregar usando estratégia de fallback
+        self.previous_global_weights = FedAvgStrategy().aggregate(clean_updates)
+
         self.logger.info(f"Agregando {len(clean_updates)} de {len(updates)} atualizações")
-        return FedAvgStrategy().aggregate(clean_updates)
-    
-    def _filter_by_cosine_similarity(self, updates: List[Tuple[List[np.ndarray], int]], client_ids: List[int]) -> List[Tuple[List[np.ndarray], int]]:
-        """
-        Filtra atualizações baseado na similaridade coseno com pesos anteriores.
-        
-        Args:
-            updates: Lista de atualizações
-            client_ids: Lista de IDs dos clientes correspondentes
-            
-        Returns:
-            Lista filtrada de atualizações
-        """
+        return self.previous_global_weights
+
+    def _filter_by_l2_and_direction(self, updates: List[Tuple[List[np.ndarray], int]], client_ids: List[int]) -> List[Tuple[List[np.ndarray], int]]:
         clean_updates = []
-        
+
+        if self.previous_global_weights is None:
+            self.logger.info("Sem média global anterior - aceitando todas as atualizações")
+            return updates
+
+        global_flat = np.concatenate([w.flatten() for w in self.previous_global_weights])
+        all_flat_updates = [
+            np.concatenate([w.flatten() for w in weights])
+            for (weights, _) in updates
+        ]
+
         for i, (weights, num_examples) in enumerate(updates):
             client_id = client_ids[i]
-            
-            # Verificar se temos pesos anteriores para este cliente
-            if client_id not in self.previous_weights:
-                # Primeiro round para este cliente - aceitar
-                clean_updates.append((weights, num_examples))
-                self.logger.info(f"Cliente {client_id}: ACEITO (primeira atualização)")
+            current_flat = all_flat_updates[i]
+
+            # Verifica se direção é oposta (produto escalar negativo)
+            dot_product = np.dot(current_flat, global_flat)
+            if dot_product < 0:
+                self.logger.info(f"Cliente {client_id}: REJEITADO (direção invertida, dot={dot_product:.3f})")
                 continue
-            
-            # Calcular similaridade coseno
-            similarity = self._calculate_cosine_similarity(weights, self.previous_weights[client_id])
-            
-            # Verificar se está acima do threshold
-            if similarity >= self.threshold:
-                clean_updates.append((weights, num_examples))
-                self.logger.info(f"Cliente {client_id}: ACEITO (similaridade={similarity:.3f})")
+
+            # Distância L2 para média global
+            l2_global = np.linalg.norm(current_flat - global_flat)
+
+            # Distância L2 para média dos pares
+            peer_updates = all_flat_updates[:i] + all_flat_updates[i+1:]
+            if peer_updates:
+                peer_mean = np.mean(peer_updates, axis=0)
+                l2_peers = np.linalg.norm(current_flat - peer_mean)
             else:
-                self.logger.info(f"Cliente {client_id}: REJEITADO (similaridade={similarity:.3f} < {self.threshold})")
-        
+                l2_peers = 0.0  # único cliente
+
+            # Critérios de aceitação
+            if l2_global <= self.l2_threshold_global and l2_peers <= self.l2_threshold_peers:
+                clean_updates.append((weights, num_examples))
+                self.logger.info(f"Cliente {client_id}: ACEITO (l2_global={l2_global:.3f}, l2_peers={l2_peers:.3f})")
+            else:
+                self.logger.info(f"Cliente {client_id}: REJEITADO (l2_global={l2_global:.3f} > {self.l2_threshold_global} "
+                                 f"ou l2_peers={l2_peers:.3f} > {self.l2_threshold_peers})")
+
         return clean_updates
-    
-    def _calculate_cosine_similarity(self, weights_current: List[np.ndarray], weights_previous: List[np.ndarray]) -> float:
-        """
-        Calcula a similaridade coseno entre pesos atuais e anteriores.
-        
-        Args:
-            weights_current: Pesos atuais do modelo
-            weights_previous: Pesos anteriores do modelo
-            
-        Returns:
-            Valor de similaridade coseno entre 0 e 1 (1 = idênticos, 0 = ortogonais)
-        """
-        try:
-            # Achatar todos os pesos em vetores únicos
-            current_flat = np.concatenate([w.flatten() for w in weights_current])
-            previous_flat = np.concatenate([w.flatten() for w in weights_previous])
-            
-            # Verificar se os vetores têm o mesmo tamanho
-            if len(current_flat) != len(previous_flat):
-                self.logger.error("Tamanhos de vetores diferentes - usando similaridade = 0")
-                return 0.0
-            
-            # Verificar se algum vetor é zero (evita divisão por zero)
-            if np.allclose(current_flat, 0) or np.allclose(previous_flat, 0):
-                self.logger.warning("Um dos vetores é zero - usando similaridade = 0.0")
-                return 0.0
-            
-            # Calcular similaridade coseno usando scipy
-            # cosine() retorna distância (1 - similaridade), então convertemos
-            cosine_distance = cosine(current_flat, previous_flat)
-            
-            # Verificar se o resultado é válido (pode ser NaN se vetores são zeros)
-            if np.isnan(cosine_distance):
-                self.logger.warning("Similaridade coseno resultou em NaN - usando 0.0")
-                return 0.0
-            
-            # Converter distância para similaridade
-            similarity = 1.0 - cosine_distance
-            
-            # Garantir que está no range [0, 1]
-            similarity = max(0.0, min(1.0, similarity))
-            
-            return similarity
-            
-        except Exception as e:
-            self.logger.error(f"Erro ao calcular similaridade coseno: {e}")
-            return 0.0  # Em caso de erro, considerar dissimilar
-    
+
+    # def _filter_by_cosine_similarity(self, updates: List[Tuple[List[np.ndarray], int]], client_ids: List[int]) -> List[Tuple[List[np.ndarray], int]]:
+    #     clean_updates = []
+
+    #     global_ref_weights = self.previous_global_weights
+    #     if global_ref_weights is None:
+    #         self.logger.info("Sem média global anterior - aceitando todas as atualizações")
+    #         return updates
+
+    #     all_flat_updates = [
+    #         np.concatenate([w.flatten() for w in weights])
+    #         for (weights, _) in updates
+    #     ]
+
+    #     for i, (weights, num_examples) in enumerate(updates):
+    #         client_id = client_ids[i]
+    #         current_flat = all_flat_updates[i]
+
+    #         # Similaridade com média global anterior
+    #         global_flat = np.concatenate([w.flatten() for w in global_ref_weights])
+    #         sim_global = 1.0 - cosine(current_flat, global_flat)
+
+    #         # Similaridade com média dos pares
+    #         peer_updates = all_flat_updates[:i] + all_flat_updates[i+1:]
+    #         if peer_updates:
+    #             peer_mean = np.mean(peer_updates, axis=0)
+    #             sim_peers = 1.0 - cosine(current_flat, peer_mean)
+    #         else:
+    #             sim_peers = 1.0
+
+    #         if sim_global >= self.threshold_global and sim_peers >= self.threshold_peers:
+    #             clean_updates.append((weights, num_examples))
+    #             self.logger.info(f"Cliente {client_id}: ACEITO (sim_global={sim_global:.3f}, sim_peers={sim_peers:.3f})")
+    #         else:
+    #             self.logger.info(f"Cliente {client_id}: REJEITADO (sim_global={sim_global:.3f} < {self.threshold_global} "
+    #                              f"ou sim_peers={sim_peers:.3f} < {self.threshold_peers})")
+
+    #     return clean_updates
+
+    # def _calculate_cosine_similarity(self, weights_current: List[np.ndarray], weights_reference: List[np.ndarray]) -> float:
+    #     try:
+    #         current_flat = np.concatenate([w.flatten() for w in weights_current])
+    #         reference_flat = np.concatenate([w.flatten() for w in weights_reference])
+
+    #         if len(current_flat) != len(reference_flat):
+    #             self.logger.error("Tamanhos de vetores diferentes - usando similaridade = 0")
+    #             return 0.0
+
+    #         if np.allclose(current_flat, 0) or np.allclose(reference_flat, 0):
+    #             self.logger.warning("Um dos vetores é zero - usando similaridade = 0.0")
+    #             return 0.0
+
+    #         cosine_distance = cosine(current_flat, reference_flat)
+    #         if np.isnan(cosine_distance):
+    #             self.logger.warning("Similaridade coseno resultou em NaN - usando 0.0")
+    #             return 0.0
+
+    #         similarity = 1.0 - cosine_distance
+    #         return max(0.0, min(1.0, similarity))
+
+    #     except Exception as e:
+    #         self.logger.error(f"Erro ao calcular similaridade coseno: {e}")
+    #         return 0.0
+
     def _update_previous_weights(self, updates: List[Tuple[List[np.ndarray], int]], client_ids: List[int]):
-        """
-        Atualiza o histórico de pesos anteriores para todos os clientes.
-        
-        Args:
-            updates: Lista de atualizações
-            client_ids: Lista de IDs dos clientes correspondentes
-        """
         for i, (weights, _) in enumerate(updates):
             client_id = client_ids[i]
-            
-            # Armazenar cópia dos pesos atuais como "anteriores" para próximo round
             self.previous_weights[client_id] = [w.copy() for w in weights]
-        
-        # Limitar número de clientes no histórico para evitar crescimento infinito
+
         if len(self.previous_weights) > self.max_clients:
-            # Remove clientes mais antigos (estratégia FIFO simples)
-            # Em implementação real, poderia usar timestamp ou LRU
             excess_clients = len(self.previous_weights) - self.max_clients
             oldest_clients = list(self.previous_weights.keys())[:excess_clients]
-            
+
             for client_id in oldest_clients:
                 del self.previous_weights[client_id]
-            
+
             self.logger.info(f"Removidos {excess_clients} clientes antigos do histórico")
     
     def get_statistics(self) -> Dict[str, Any]:

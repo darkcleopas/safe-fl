@@ -175,3 +175,5 @@ results/
 intermediate_models/
 client_models/
 logs/
+experiment_results/
+config/

@@ -331,28 +331,6 @@ def analyze_experiments(experiments, experiment_group=None):
         print(f"{i+1}. {exp_name}: Acurácia={final_acc:.4f}, Defesa={defense}, " +
               f"Ataque={attack} ({int(attack_pct*100)}%)")
     
-    # Analisar efeito das estratégias de defesa
-    print("\nComparação entre estratégias de defesa:")
-    defense_strategies = {}
-    
-    for exp in experiments:
-        config = exp['config']
-        metrics = exp['metrics']
-        
-        if not metrics.get('accuracy'):
-            continue
-            
-        defense = config.get('server', {}).get('aggregation_strategy', 'N/A')
-        final_acc = metrics.get('accuracy', [-1])[-1]
-        
-        if defense not in defense_strategies:
-            defense_strategies[defense] = []
-        
-        defense_strategies[defense].append(final_acc)
-    
-    for defense, accs in defense_strategies.items():
-        avg_acc = sum(accs) / len(accs) if accs else 0
-        print(f"- {defense}: Acurácia média={avg_acc:.4f} (em {len(accs)} experimentos)")
 
 # Função principal com mais opções
 def main():
@@ -382,25 +360,25 @@ def main():
         else:
             print(f"Gerando plots para ataque {attack_type}...")
         
-        # Plotar acurácias
-        plot_accuracies(
-            exps, 
-            smooth=smooth, 
-            window_size=window_size,
-            max_rounds=max_rounds,
-            attack_type=attack_type,
-            subplots=use_subplots
-        )
+        # # Plotar acurácias
+        # plot_accuracies(
+        #     exps, 
+        #     smooth=smooth, 
+        #     window_size=window_size,
+        #     max_rounds=max_rounds,
+        #     attack_type=attack_type,
+        #     subplots=use_subplots
+        # )
         
-        # Plotar losses
-        plot_losses(
-            exps, 
-            smooth=smooth, 
-            window_size=window_size,
-            max_rounds=max_rounds,
-            attack_type=attack_type,
-            subplots=use_subplots
-        )
+        # # Plotar losses
+        # plot_losses(
+        #     exps, 
+        #     smooth=smooth, 
+        #     window_size=window_size,
+        #     max_rounds=max_rounds,
+        #     attack_type=attack_type,
+        #     subplots=use_subplots
+        # )
         
         # Analisar os resultados
         analyze_experiments(exps, attack_type)

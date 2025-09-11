@@ -15,6 +15,7 @@ import seaborn as sns
 from pathlib import Path
 from datetime import datetime, timedelta
 import numpy as np
+import argparse
 
 # Adicionar diretório raiz ao path
 sys.path.append(os.path.dirname(os.path.abspath(__file__)))
@@ -25,7 +26,7 @@ from fl_simulator import FLSimulator
 class DefenseComparisonRunner:
     """Runner para comparação completa de defesas."""
     
-    def __init__(self):
+    def __init__(self, load_results_dir=None):
         self.defenses = ['COSINE_SIMILARITY', 'FED_AVG', 'TRIMMED_MEAN', 'KRUM', 'MULTI_KRUM', 'CLUSTERING']
         self.attack_rates = [0.0, 0.2, 0.4, 0.6, 0.8]
         self.selection_fractions = [0.4, 1.0]
@@ -38,17 +39,31 @@ class DefenseComparisonRunner:
         self.save_client_models = False  # Salvar modelos dos clientes após cada round
         self.save_server_intermediate_models = False  # Salvar modelos intermediários do servidor
 
-        self.base_dir = Path(f'simulation_{datetime.now().strftime("%Y%m%d_%H%M%S")}')
+        # Definir diretório base
+        if load_results_dir:
+            self.base_dir = Path(load_results_dir)
+            self.load_only_mode = True
+            print(f"🔄 Modo carregamento: {self.base_dir}")
+        else:
+            self.base_dir = Path(f'simulation_{datetime.now().strftime("%Y%m%d_%H%M%S")}')
+            self.load_only_mode = False
+            print(f"🆕 Modo execução: {self.base_dir}")
         
         # Diretórios
         self.config_dir = self.base_dir / 'config'
         self.results_dir = self.base_dir / 'results'
         self.plots_dir = self.base_dir / 'plots'
         
-        # Criar diretórios
-        self.config_dir.mkdir(parents=True, exist_ok=True)
-        self.results_dir.mkdir(parents=True, exist_ok=True)
-        self.plots_dir.mkdir(parents=True, exist_ok=True)
+        # Criar diretórios apenas se não estivermos em modo load-only
+        if not self.load_only_mode:
+            self.config_dir.mkdir(parents=True, exist_ok=True)
+            self.results_dir.mkdir(parents=True, exist_ok=True)
+            self.plots_dir.mkdir(parents=True, exist_ok=True)
+        else:
+            # Verificar se os diretórios existem
+            if not self.results_dir.exists():
+                raise FileNotFoundError(f"Diretório de resultados não encontrado: {self.results_dir}")
+            self.plots_dir.mkdir(parents=True, exist_ok=True)
         
         # Armazenar resultados
         self.all_results = {}
@@ -104,8 +119,9 @@ class DefenseComparisonRunner:
             config['server']['trim_ratio'] = 0.4
         elif defense == 'COSINE_SIMILARITY':
             config['server'].update({
-                'min_rounds': 10,
-                'threshold': 0.4,
+                'min_rounds': 5,
+                'l2_threshold_global': 2.3,
+                'l2_threshold_peers': 2.0,
                 'fallback_strategy': 'FED_AVG'
             })
         
@@ -118,7 +134,7 @@ class DefenseComparisonRunner:
         
         # Verificar se arquivo de resultados completos existe
         results_file = self.results_dir / 'complete_results.json'
-        if results_file.exists():
+        if results_file.exists() and not self.load_only_mode:
             try:
                 with open(results_file, 'r') as f:
                     data = json.load(f)
@@ -147,7 +163,7 @@ class DefenseComparisonRunner:
                             config = yaml.safe_load(f)
                         
                         # Extrair informações
-                        exp_name = exp_dir.name
+                        exp_name = '_'.join(exp_dir.name.split('_')[:-1])
                         malicious_pct = config.get('clients', {}).get('malicious_percentage', 0.0)
                         selection_frac = config.get('server', {}).get('selection_fraction', 0.4)
                         defense = config.get('server', {}).get('aggregation_strategy', 'UNKNOWN')
@@ -236,19 +252,24 @@ class DefenseComparisonRunner:
                 for selection_fraction in self.selection_fractions:
                     config, exp_name = self.create_config(defense, attack_rate, selection_fraction)
                     
-                    # Salvar arquivo
-                    config_path = self.config_dir / f'{exp_name}.yaml'
-                    with open(config_path, 'w') as f:
-                        yaml.dump(config, f, default_flow_style=False)
+                    # Salvar arquivo apenas se não estivermos em modo load-only
+                    if not self.load_only_mode:
+                        config_path = self.config_dir / f'{exp_name}.yaml'
+                        with open(config_path, 'w') as f:
+                            yaml.dump(config, f, default_flow_style=False)
+                    else:
+                        config_path = None
                     
                     configs[exp_name] = {
-                        'config_path': str(config_path),
+                        'config_path': str(config_path) if config_path else None,
                         'defense': defense,
                         'attack_rate': attack_rate,
                         'selection_fraction': selection_fraction
                     }
         
-        print(f"✅ {len(configs)} configurações criadas em {self.config_dir}")
+        if not self.load_only_mode:
+            print(f"✅ {len(configs)} configurações criadas em {self.config_dir}")
+        
         return configs
     
     def estimate_time(self, configs):
@@ -441,37 +462,53 @@ class DefenseComparisonRunner:
         
         df = pd.DataFrame(plot_data)
         
+        # Definir cores e estilos consistentes para cada defesa
+        defense_styles = {
+            'COSINE_SIMILARITY': {'color': '#1f77b4', 'marker': 'o', 'linestyle': '-'},
+            'FED_AVG': {'color': '#ff7f0e', 'marker': 's', 'linestyle': '--'},
+            'TRIMMED_MEAN': {'color': '#2ca02c', 'marker': '^', 'linestyle': '-'},
+            'KRUM': {'color': '#d62728', 'marker': 'D', 'linestyle': '-'},
+            'MULTI_KRUM': {'color': '#9467bd', 'marker': 'v', 'linestyle': '-'},
+            'CLUSTERING': {'color': '#8c564b', 'marker': 'p', 'linestyle': '-'}
+        }
+        
         # Plot 1: Acurácia vs Taxa de Ataque por Defesa (Selection 40%)
-        plt.figure(figsize=(12, 8))
+        plt.figure(figsize=(16, 12))
         
         plt.subplot(2, 2, 1)
         df_40 = df[df['selection_fraction'] == 0.4]
         for defense in self.defenses:
-            defense_data = df_40[df_40['defense'] == defense]
-            plt.plot(defense_data['attack_rate'] * 100, defense_data['final_accuracy'], 
-                    'o-', label=defense, linewidth=2, markersize=6)
+            defense_data = df_40[df_40['defense'] == defense].sort_values('attack_rate')
+            if len(defense_data) > 0:
+                style = defense_styles.get(defense, {'color': 'black', 'marker': 'o', 'linestyle': '-'})
+                plt.plot(defense_data['attack_rate'] * 100, defense_data['final_accuracy'], 
+                        color=style['color'], marker=style['marker'], linestyle=style['linestyle'],
+                        label=defense, linewidth=2.5, markersize=8, alpha=0.8)
         
-        plt.xlabel('Taxa de Ataque (%)')
-        plt.ylabel('Acurácia Final')
-        plt.title('Defesas vs Ataques Label Flipping (Seleção 40%)')
-        plt.legend()
+        plt.xlabel('Taxa de Ataque (%)', fontsize=12)
+        plt.ylabel('Acurácia Final', fontsize=12)
+        plt.title('Defesas vs Ataques Label Flipping (Seleção 40%)', fontsize=14, fontweight='bold')
+        plt.legend(bbox_to_anchor=(1.05, 1), loc='upper left', fontsize=10)
         plt.grid(True, alpha=0.3)
-        plt.ylim(0, 1)
+        plt.ylim(0, 1.05)
         
         # Plot 2: Acurácia vs Taxa de Ataque por Defesa (Selection 100%)
         plt.subplot(2, 2, 2)
         df_100 = df[df['selection_fraction'] == 1.0]
         for defense in self.defenses:
-            defense_data = df_100[df_100['defense'] == defense]
-            plt.plot(defense_data['attack_rate'] * 100, defense_data['final_accuracy'], 
-                    'o-', label=defense, linewidth=2, markersize=6)
+            defense_data = df_100[df_100['defense'] == defense].sort_values('attack_rate')
+            if len(defense_data) > 0:
+                style = defense_styles.get(defense, {'color': 'black', 'marker': 'o', 'linestyle': '-'})
+                plt.plot(defense_data['attack_rate'] * 100, defense_data['final_accuracy'], 
+                        color=style['color'], marker=style['marker'], linestyle=style['linestyle'],
+                        label=defense, linewidth=2.5, markersize=8, alpha=0.8)
         
-        plt.xlabel('Taxa de Ataque (%)')
-        plt.ylabel('Acurácia Final')
-        plt.title('Defesas vs Ataques Label Flipping (Seleção 100%)')
-        plt.legend()
+        plt.xlabel('Taxa de Ataque (%)', fontsize=12)
+        plt.ylabel('Acurácia Final', fontsize=12)
+        plt.title('Defesas vs Ataques Label Flipping (Seleção 100%)', fontsize=14, fontweight='bold')
+        plt.legend(bbox_to_anchor=(1.05, 1), loc='upper left', fontsize=10)
         plt.grid(True, alpha=0.3)
-        plt.ylim(0, 1)
+        plt.ylim(0, 1.05)
         
         # Plot 3: Comparação de Seleção de Clientes
         plt.subplot(2, 2, 3)
@@ -481,16 +518,22 @@ class DefenseComparisonRunner:
             acc_40 = []
             acc_100 = []
             for rate in attack_rates_plot:
-                acc_40.append(df_40[(df_40['defense'] == defense) & (df_40['attack_rate'] == rate)]['final_accuracy'].iloc[0] if len(df_40[(df_40['defense'] == defense) & (df_40['attack_rate'] == rate)]) > 0 else 0)
-                acc_100.append(df_100[(df_100['defense'] == defense) & (df_100['attack_rate'] == rate)]['final_accuracy'].iloc[0] if len(df_100[(df_100['defense'] == defense) & (df_100['attack_rate'] == rate)]) > 0 else 0)
+                acc_40_val = df_40[(df_40['defense'] == defense) & (df_40['attack_rate'] == rate)]['final_accuracy']
+                acc_100_val = df_100[(df_100['defense'] == defense) & (df_100['attack_rate'] == rate)]['final_accuracy']
+                
+                acc_40.append(acc_40_val.iloc[0] if len(acc_40_val) > 0 else 0)
+                acc_100.append(acc_100_val.iloc[0] if len(acc_100_val) > 0 else 0)
             
             improvement = [(a100 - a40) for a40, a100 in zip(acc_40, acc_100)]
-            plt.plot(attack_rates_plot, improvement, 'o-', label=defense)
+            style = defense_styles.get(defense, {'color': 'black', 'marker': 'o', 'linestyle': '-'})
+            plt.plot([r*100 for r in attack_rates_plot], improvement, 
+                    color=style['color'], marker=style['marker'], linestyle=style['linestyle'],
+                    label=defense, linewidth=2.5, markersize=8, alpha=0.8)
         
-        plt.xlabel('Taxa de Ataque')
-        plt.ylabel('Melhoria (100% - 40%)')
-        plt.title('Impacto da Seleção de Clientes')
-        plt.legend()
+        plt.xlabel('Taxa de Ataque (%)', fontsize=12)
+        plt.ylabel('Melhoria (100% - 40%)', fontsize=12)
+        plt.title('Impacto da Seleção de Clientes', fontsize=14, fontweight='bold')
+        plt.legend(fontsize=10)
         plt.grid(True, alpha=0.3)
         plt.axhline(y=0, color='black', linestyle='--', alpha=0.5)
         
@@ -513,10 +556,11 @@ class DefenseComparisonRunner:
                    xticklabels=[f'{int(r*100)}%' for r in self.attack_rates],
                    yticklabels=self.defenses,
                    cmap='RdYlGn',
-                   vmin=0, vmax=1)
-        plt.title('Acurácia por Defesa vs Taxa de Ataque')
-        plt.xlabel('Taxa de Ataque')
-        plt.ylabel('Defesa')
+                   vmin=0, vmax=1,
+                   cbar_kws={'label': 'Acurácia'})
+        plt.title('Acurácia por Defesa vs Taxa de Ataque (Seleção 40%)', fontsize=14, fontweight='bold')
+        plt.xlabel('Taxa de Ataque', fontsize=12)
+        plt.ylabel('Defesa', fontsize=12)
         
         plt.tight_layout()
         plot_path = self.plots_dir / 'defense_comparison_complete.png'
@@ -528,12 +572,137 @@ class DefenseComparisonRunner:
         # Criar plots de evolução temporal
         self.create_temporal_evolution_plots()
         
-        return str(plot_path)
+        # Criar plots individuais por defesa (mais limpos)
+        self.create_individual_defense_plots(df, defense_styles)
+        
+    def create_individual_defense_plots(self, df, defense_styles):
+        """Cria plots individuais para cada defesa para melhor visualização."""
+        
+        print("\n📈 Criando plots individuais por defesa...")
+        
+        # Criar figura grande para todas as defesas
+        fig, axes = plt.subplots(2, 3, figsize=(18, 12))
+        axes = axes.flatten()
+        
+        for i, defense in enumerate(self.defenses):
+            ax = axes[i]
+            
+            # Dados para seleção 40%
+            df_40 = df[(df['selection_fraction'] == 0.4) & (df['defense'] == defense)].sort_values('attack_rate')
+            # Dados para seleção 100%
+            df_100 = df[(df['selection_fraction'] == 1.0) & (df['defense'] == defense)].sort_values('attack_rate')
+            
+            style = defense_styles.get(defense, {'color': 'black', 'marker': 'o', 'linestyle': '-'})
+            
+            if len(df_40) > 0:
+                ax.plot(df_40['attack_rate'] * 100, df_40['final_accuracy'], 
+                       color=style['color'], marker='o', linestyle='-',
+                       label='Seleção 40%', linewidth=3, markersize=8, alpha=0.8)
+            
+            if len(df_100) > 0:
+                ax.plot(df_100['attack_rate'] * 100, df_100['final_accuracy'], 
+                       color=style['color'], marker='s', linestyle='--',
+                       label='Seleção 100%', linewidth=3, markersize=8, alpha=0.8)
+            
+            ax.set_xlabel('Taxa de Ataque (%)', fontsize=12)
+            ax.set_ylabel('Acurácia Final', fontsize=12)
+            ax.set_title(f'{defense}', fontsize=14, fontweight='bold')
+            ax.legend(fontsize=11)
+            ax.grid(True, alpha=0.3)
+            ax.set_ylim(0, 1.05)
+            ax.set_xlim(-5, 85)
+        
+        plt.suptitle('Performance Individual de Cada Defesa', fontsize=16, fontweight='bold', y=0.98)
+        plt.tight_layout()
+        
+        # Salvar figura
+        individual_plot_path = self.plots_dir / 'individual_defense_performance.png'
+        plt.savefig(individual_plot_path, dpi=300, bbox_inches='tight')
+        plt.show()
+        
+        print(f"✅ Plots individuais salvos em: {individual_plot_path}")
+        
+    def debug_missing_experiments(self):
+        """Debug para identificar experimentos faltantes ou com problemas."""
+        
+        print("\n🔍 Debug: Verificando experimentos...")
+        
+        expected_experiments = set()
+        for defense in self.defenses:
+            for attack_rate in self.attack_rates:
+                for selection_fraction in self.selection_fractions:
+                    attack_name = "no_attack" if attack_rate == 0.0 else f"label_flipping_{int(attack_rate*100)}"
+                    selection_name = "all_clients" if selection_fraction == 1.0 else f"sel_{int(selection_fraction*100)}"
+                    exp_name = f"{attack_name}_{defense.lower()}_{selection_name}"
+                    expected_experiments.add(exp_name)
+        
+        found_experiments = set(self.all_results.keys())
+        successful_experiments = set(name for name, result in self.all_results.items() if result.get('success', False))
+        
+        missing_experiments = expected_experiments - found_experiments
+        failed_experiments = found_experiments - successful_experiments
+        
+        print(f"📊 Estatísticas dos experimentos:")
+        print(f"  📝 Esperados: {len(expected_experiments)}")
+        print(f"  ✅ Encontrados: {len(found_experiments)}")
+        print(f"  🎯 Bem-sucedidos: {len(successful_experiments)}")
+        print(f"  ❌ Faltando: {len(missing_experiments)}")
+        print(f"  ⚠️ Falharam: {len(failed_experiments)}")
+        
+        if missing_experiments:
+            print(f"\n❌ Experimentos faltando:")
+            for exp in sorted(missing_experiments):
+                print(f"  • {exp}")
+        
+        if failed_experiments:
+            print(f"\n⚠️ Experimentos que falharam:")
+            for exp in sorted(failed_experiments):
+                error = self.all_results[exp].get('error', 'Erro desconhecido')
+                print(f"  • {exp}: {error}")
+        
+        # Verificar experimentos com dados temporais faltantes
+        temporal_issues = []
+        for exp_name, result in self.all_results.items():
+            if result.get('success', False):
+                metrics = result.get('metrics', {})
+                rounds = metrics.get('rounds', [])
+                accuracies = metrics.get('accuracy', [])
+                
+                if not rounds or not accuracies:
+                    temporal_issues.append(exp_name)
+                elif len(rounds) != len(accuracies):
+                    temporal_issues.append(f"{exp_name} (dimensões incompatíveis)")
+        
+        if temporal_issues:
+            print(f"\n📈 Experimentos com problemas temporais ({len(temporal_issues)}):")
+            for exp in temporal_issues[:10]:  # Mostrar apenas os primeiros 10
+                print(f"  • {exp}")
+            if len(temporal_issues) > 10:
+                print(f"  ... e mais {len(temporal_issues) - 10}")
+        
+        return {
+            'expected': len(expected_experiments),
+            'found': len(found_experiments),
+            'successful': len(successful_experiments),
+            'missing': len(missing_experiments),
+            'failed': len(failed_experiments),
+            'temporal_issues': len(temporal_issues)
+        }
     
     def create_temporal_evolution_plots(self):
         """Cria plots de evolução temporal da acurácia ao longo dos rounds."""
         
         print("\n📈 Criando plots de evolução temporal...")
+        
+        # Definir cores e estilos consistentes para cada defesa
+        defense_styles = {
+            'COSINE_SIMILARITY': {'color': '#1f77b4', 'linestyle': '-'},
+            'FED_AVG': {'color': '#ff7f0e', 'linestyle': '--'},
+            'TRIMMED_MEAN': {'color': '#2ca02c', 'linestyle': '-'},
+            'KRUM': {'color': '#d62728', 'linestyle': '-'},
+            'MULTI_KRUM': {'color': '#9467bd', 'linestyle': '-'},
+            'CLUSTERING': {'color': '#8c564b', 'linestyle': '-'}
+        }
         
         # Obter taxas de ataque únicas dos resultados (não usar constantes)
         available_attack_rates = set()
@@ -550,33 +719,38 @@ class DefenseComparisonRunner:
             
             # Configurar subplots baseado no número de taxas de ataque disponíveis
             n_attacks = len(available_attack_rates)
-            cols = 3 if n_attacks > 3 else n_attacks
+            if n_attacks == 0:
+                print(f"⚠️ Nenhuma taxa de ataque encontrada para seleção {selection_name}")
+                continue
+                
+            cols = min(3, n_attacks)
             rows = (n_attacks + cols - 1) // cols  # Ceil division
             
-            fig, axes = plt.subplots(rows, cols, figsize=(5*cols, 4*rows))
-            if rows == 1 and cols == 1:
+            fig, axes = plt.subplots(rows, cols, figsize=(6*cols, 5*rows))
+            
+            # Tratar diferentes casos de subplot
+            if n_attacks == 1:
                 axes = [axes]
-            elif rows == 1 or cols == 1:
-                axes = axes.flatten() if hasattr(axes, 'flatten') else [axes]
+            elif rows == 1:
+                axes = [axes] if cols == 1 else list(axes)
             else:
                 axes = axes.flatten()
             
-            # Garantir que temos axes suficientes
-            while len(axes) < n_attacks:
-                axes.append(None)
-            
             plot_count = 0
+            plots_with_data = 0
             
             for attack_rate in available_attack_rates:
-                if plot_count >= len(axes) or axes[plot_count] is None:
+                if plot_count >= len(axes):
                     break
                     
                 ax = axes[plot_count]
                 attack_name = "Sem Ataque" if attack_rate == 0.0 else f"{int(attack_rate*100)}% Atacantes"
                 
+                # Contador de defesas plotadas neste subplot
+                defenses_plotted = 0
+                
                 # Plotar cada defesa
                 for defense in self.defenses:
-                    line_style = '--' if defense == 'FED_AVG' else '-'
                     # Buscar experimento correspondente
                     attack_exp_name = "no_attack" if attack_rate == 0.0 else f"label_flipping_{int(attack_rate*100)}"
                     selection_exp_name = "all_clients" if selection_fraction == 1.0 else f"sel_{int(selection_fraction*100)}"
@@ -587,59 +761,84 @@ class DefenseComparisonRunner:
                         rounds = metrics.get('rounds', [])
                         accuracies = metrics.get('accuracy', [])
                         
-                        if rounds and accuracies:
-                            ax.plot(rounds, accuracies, line_style, label=defense, 
-                                   linewidth=2, markersize=4, alpha=0.8)
+                        if rounds and accuracies and len(rounds) == len(accuracies):
+                            style = defense_styles.get(defense, {'color': 'black', 'linestyle': '-'})
+                            ax.plot(rounds, accuracies, 
+                                   color=style['color'], 
+                                   linestyle=style['linestyle'],
+                                   label=defense, 
+                                   linewidth=2.5, 
+                                   alpha=0.8)
+                            defenses_plotted += 1
                 
-                ax.set_xlabel('Round')
-                ax.set_ylabel('Acurácia')
-                ax.set_title(attack_name)
-                ax.legend(fontsize=8)
-                ax.grid(True, alpha=0.3)
-                ax.set_ylim(0, 1)
+                # Configurar o subplot apenas se houver dados
+                if defenses_plotted > 0:
+                    ax.set_xlabel('Round', fontsize=11)
+                    ax.set_ylabel('Acurácia', fontsize=11)
+                    ax.set_title(attack_name, fontsize=12, fontweight='bold')
+                    ax.legend(fontsize=9, loc='best')
+                    ax.grid(True, alpha=0.3)
+                    ax.set_ylim(0, 1.05)
+                    plots_with_data += 1
+                else:
+                    # Se não há dados, ocultar o subplot
+                    ax.text(0.5, 0.5, f'Sem dados\n{attack_name}', 
+                           ha='center', va='center', transform=ax.transAxes,
+                           fontsize=12, style='italic', color='gray')
+                    ax.set_xticks([])
+                    ax.set_yticks([])
                 
                 plot_count += 1
             
             # Ocultar subplots não utilizados
             for i in range(plot_count, len(axes)):
-                if axes[i] is not None:
-                    axes[i].set_visible(False)
+                axes[i].set_visible(False)
             
-            plt.suptitle(f'Evolução da Acurácia ao Longo dos Rounds (Seleção {selection_name})', 
-                        fontsize=14, y=0.98)
-            plt.tight_layout()
-            
-            # Salvar figura
-            temporal_plot_path = self.plots_dir / f'temporal_evolution_selection_{int(selection_fraction*100)}.png'
-            plt.savefig(temporal_plot_path, dpi=300, bbox_inches='tight')
-            plt.show()
-            
-            print(f"✅ Plot temporal (seleção {selection_name}) salvo em: {temporal_plot_path}")
+            # Verificar se temos pelo menos alguns plots com dados
+            if plots_with_data > 0:
+                plt.suptitle(f'Evolução da Acurácia ao Longo dos Rounds (Seleção {selection_name})', 
+                            fontsize=16, fontweight='bold', y=0.98)
+                plt.tight_layout()
+                
+                # Salvar figura
+                temporal_plot_path = self.plots_dir / f'temporal_evolution_selection_{int(selection_fraction*100)}.png'
+                plt.savefig(temporal_plot_path, dpi=300, bbox_inches='tight')
+                plt.show()
+                
+                print(f"✅ Plot temporal (seleção {selection_name}) salvo em: {temporal_plot_path}")
+            else:
+                plt.close(fig)
+                print(f"⚠️ Nenhum dado encontrado para plots temporais (seleção {selection_name})")
         
         return True
     
     def create_cost_plots(self, df_cost):
-        """Cria plots das métricas de custo."""
-        print("\n📉 Criando plots de custo...")
+        """Cria plots das métricas de custo, separados por seleção."""
+        print("\n📉 Criando plots de custo por seleção...")
 
-        plt.figure(figsize=(16, 10))
+        selection_groups = df_cost['selection_fraction'].unique()
 
-        metrics = ['avg_comm_bytes', 'avg_agg_time', 'avg_round_time', 'avg_memory']
-        titles = ['Bytes Transmitidos', 'Tempo de Agregação (s)', 'Tempo por Round (s)', 'Uso de Memória (MB)']
+        for frac in selection_groups:
+            frac_label = f"{int(frac*100)}"
+            df_sel = df_cost[df_cost['selection_fraction'] == frac]
+            plt.figure(figsize=(16, 10))
 
-        for i, metric in enumerate(metrics):
-            plt.subplot(2, 2, i+1)
-            sns.boxplot(data=df_cost, x='defense', y=metric)
-            plt.title(titles[i])
-            plt.xticks(rotation=45)
-            plt.grid(True, alpha=0.3)
+            metrics = ['avg_comm_bytes', 'avg_agg_time', 'avg_round_time', 'avg_memory']
+            titles = ['Bytes Transmitidos', 'Tempo de Agregação (s)', 'Tempo por Round (s)', 'Uso de Memória (MB)']
 
-        plt.tight_layout()
-        cost_plot_path = self.plots_dir / 'cost_comparison.png'
-        plt.savefig(cost_plot_path, dpi=300, bbox_inches='tight')
-        plt.show()
+            for i, metric in enumerate(metrics):
+                plt.subplot(2, 2, i+1)
+                sns.boxplot(data=df_sel, x='defense', y=metric)
+                plt.title(f"{titles[i]} (Seleção {frac_label}%)")
+                plt.xticks(rotation=45)
+                plt.grid(True, alpha=0.3)
 
-        print(f"✅ Plots de custo salvos em: {cost_plot_path}")
+            plt.tight_layout()
+            plot_path = self.plots_dir / f'cost_comparison_selection_{frac_label}.png'
+            plt.savefig(plot_path, dpi=300, bbox_inches='tight')
+            plt.close()
+
+            print(f"✅ Plot de custo (seleção {frac_label}%) salvo em: {plot_path}")
 
     def save_results_summary(self):
         """Salva resumo dos resultados."""
@@ -688,42 +887,58 @@ class DefenseComparisonRunner:
     def run_complete_analysis(self):
         """Executa análise completa com suporte incremental."""
         
-        print("🔬 ANÁLISE COMPLETA DE DEFESAS EM FEDERATED LEARNING")
+        if self.load_only_mode:
+            print("🔍 MODO CARREGAMENTO - ANÁLISE DE RESULTADOS EXISTENTES")
+        else:
+            print("🔬 ANÁLISE COMPLETA DE DEFESAS EM FEDERATED LEARNING")
         print("="*60)
         
         # 1. Carregar resultados existentes
         self.load_existing_results()
         
-        # 2. Gerar todas as configurações (incluindo novas defesas)
-        all_configs = self.generate_all_configs()
-        
-        # 3. Filtrar apenas configurações pendentes
-        pending_configs = self.filter_pending_configs(all_configs)
-        
-        # 4. Estimar tempo apenas para experimentos pendentes
-        self.estimate_time(pending_configs)
-        
-        # 5. Confirmar execução (só se houver experimentos pendentes)
-        if pending_configs:
-            response = input(f"\n❓ Continuar com {len(pending_configs)} experimentos pendentes? (y/N): ").lower()
-            if response != 'y':
-                print("❌ Execução cancelada.")
-                # Ainda podemos fazer análise dos resultados existentes
-                if self.existing_results:
-                    print("📊 Fazendo análise apenas dos resultados existentes...")
-                    self.all_results = self.existing_results
-                else:
-                    return
-        
-        # 6. Executar apenas experimentos pendentes
-        if pending_configs:
-            new_results = self.run_experiments(pending_configs)
-            
-            # 7. Mesclar resultados existentes + novos
-            self.all_results = self.merge_results(new_results)
-        else:
-            # Usar apenas resultados existentes
+        if self.load_only_mode:
+            # Modo load-only: usar apenas resultados existentes e pular execução
+            print(f"📊 Modo carregamento ativado - usando {len(self.existing_results)} experimentos")
             self.all_results = self.existing_results
+            
+            if not self.all_results:
+                print("❌ Nenhum resultado encontrado no diretório especificado!")
+                return {}, {}
+        else:
+            # Modo normal: gerar configurações e executar se necessário
+            # 2. Gerar todas as configurações (incluindo novas defesas)
+            all_configs = self.generate_all_configs()
+            
+            # 3. Filtrar apenas configurações pendentes
+            pending_configs = self.filter_pending_configs(all_configs)
+            
+            # 4. Estimar tempo apenas para experimentos pendentes
+            self.estimate_time(pending_configs)
+            
+            # 5. Confirmar execução (só se houver experimentos pendentes)
+            if pending_configs:
+                response = input(f"\n❓ Continuar com {len(pending_configs)} experimentos pendentes? (y/N): ").lower()
+                if response != 'y':
+                    print("❌ Execução cancelada.")
+                    # Ainda podemos fazer análise dos resultados existentes
+                    if self.existing_results:
+                        print("📊 Fazendo análise apenas dos resultados existentes...")
+                        self.all_results = self.existing_results
+                    else:
+                        return {}, {}
+            
+            # 6. Executar apenas experimentos pendentes
+            if pending_configs:
+                new_results = self.run_experiments(pending_configs)
+                
+                # 7. Mesclar resultados existentes + novos
+                self.all_results = self.merge_results(new_results)
+            else:
+                # Usar apenas resultados existentes
+                self.all_results = self.existing_results
+        
+        # 7.5. Debug para identificar problemas
+        debug_stats = self.debug_missing_experiments()
         
         # 8. Analisar pontos de ruptura (dataset completo)
         breaking_points = self.analyze_breaking_points()
@@ -740,22 +955,57 @@ class DefenseComparisonRunner:
 
         # 12. Resumo final
         successful = sum(1 for r in self.all_results.values() if r.get('success', False))
-        total_planned = len(all_configs)
+        total_experiments = len(self.all_results)
         
         print(f"\n🎉 ANÁLISE CONCLUÍDA!")
-        print(f"✅ {successful}/{total_planned} experimentos bem-sucedidos")
-        if pending_configs:
+        print(f"✅ {successful}/{total_experiments} experimentos bem-sucedidos")
+        if not self.load_only_mode and 'new_results' in locals():
             print(f"🆕 {len(new_results)} novos experimentos executados")
         print(f"📊 Plots com dataset completo salvos em: {plot_path}")
         print(f"💾 Resultados completos em: {results_path}")
         
+        # Mostrar resumo de qualidade dos dados
+        if debug_stats['temporal_issues'] > 0:
+            print(f"⚠️ {debug_stats['temporal_issues']} experimentos com problemas temporais detectados")
+        
         return self.all_results, breaking_points
+
+
+def parse_arguments():
+    """Parse argumentos de linha de comando."""
+    parser = argparse.ArgumentParser(
+        description="Script para comparação de defesas em Federated Learning",
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+        epilog="""
+Exemplos de uso:
+  
+  # Executar experimentos completos (modo normal)
+  python complete_defense_comparison.py
+  
+  # Carregar resultados existentes e gerar plots
+  python complete_defense_comparison.py --load_result_dir /path/to/simulation_20250714_074202
+        """
+    )
+    
+    parser.add_argument(
+        '--load_result_dir',
+        type=str,
+        help='Diretório contendo resultados existentes para análise (pula execução de novos experimentos)'
+    )
+    
+    return parser.parse_args()
 
 
 def main():
     """Função principal."""
-    runner = DefenseComparisonRunner()
+    args = parse_arguments()
+    
+    # Criar runner com modo apropriado
+    runner = DefenseComparisonRunner(load_results_dir=args.load_result_dir)
+    
+    # Executar análise
     results, breaking_points = runner.run_complete_analysis()
+    
     return results, breaking_points
 
 
