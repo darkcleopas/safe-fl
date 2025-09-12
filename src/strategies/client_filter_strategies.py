@@ -1,9 +1,113 @@
 import numpy as np
-from typing import List, Tuple, Dict, Any, Optional
+from typing import List, Tuple, Dict, Any, Deque
 from scipy.cluster.hierarchy import linkage, fcluster
 from scipy.spatial.distance import squareform
+from collections import deque
 
 from src.strategies.abc_strategies import ClientFilterStrategy
+
+
+class AdaptiveL2ClientFilter(ClientFilterStrategy):
+    """
+    Filtra clientes com base na distância L2, usando um threshold adaptativo
+    calculado a partir da mediana e desvio padrão de uma janela móvel das
+    últimas N rodadas. Também verifica a direção do vetor.
+    """
+
+    def __init__(self, config: Dict[str, Any] = None):
+        super().__init__(config)
+        # Parâmetros para o threshold adaptativo
+        self.window_size = self.config.get('window_size', 7)
+        self.std_dev_multiplier = self.config.get('std_dev_multiplier', 1.5)
+        self.min_rounds_history = self.config.get('min_rounds_history', 5)
+
+        # Deques para armazenar o histórico de distâncias (apenas clientes aceitos)
+        self.global_distance_history: Deque[float] = deque(maxlen=self.window_size)
+        self.peer_distance_history: Deque[float] = deque(maxlen=self.window_size)
+
+    def filter(
+        self, 
+        updates: List[Tuple[List[np.ndarray], int]], 
+        client_ids: List[int], 
+        server_context: Dict[str, Any]
+    ) -> List[Tuple[List[np.ndarray], int]]:
+        
+        current_round = server_context.get('round', 0)
+        previous_global_weights = server_context.get('previous_global_weights')
+
+        if not updates:
+            return []
+
+        if previous_global_weights is None:
+            self.logger.warning("Filtro L2 Adaptativo: Sem pesos globais anteriores, todos os clientes aprovados.")
+            return updates
+
+        # 1. Calcular todas as distâncias primeiro
+        global_flat = np.concatenate([w.flatten() for w in previous_global_weights])
+        all_flat_updates = [
+            np.concatenate([layer.flatten() for layer in weights]) 
+            for weights, _ in updates
+        ]
+
+        distances = []
+        for i, current_flat in enumerate(all_flat_updates):
+            # Verificação de direção
+            dot_product = np.dot(current_flat, global_flat)
+            if dot_product < 0:
+                distances.append({'l2_global': float('inf'), 'l2_peers': float('inf'), 'dot': dot_product})
+                continue
+
+            l2_global = np.linalg.norm(current_flat - global_flat)
+            
+            peer_updates = all_flat_updates[:i] + all_flat_updates[i+1:]
+            l2_peers = np.linalg.norm(current_flat - np.median(peer_updates, axis=0)) if peer_updates else 0.0
+            
+            distances.append({'l2_global': l2_global, 'l2_peers': l2_peers, 'dot': dot_product})
+
+        # 2. Calcular os thresholds adaptativos
+        if len(self.global_distance_history) < self.min_rounds_history:
+            # Em rodadas iniciais, usa um threshold muito alto para aceitar a maioria
+            l2_threshold_global = float('inf')
+            l2_threshold_peers = float('inf')
+            self.logger.info(f"Filtro L2 Adaptativo: Pouco histórico ({len(self.global_distance_history)} < {self.min_rounds_history}). Usando thresholds permissivos.")
+        else:
+            median_global = np.median(self.global_distance_history)
+            std_global = np.std(self.global_distance_history)
+            l2_threshold_global = median_global + self.std_dev_multiplier * std_global
+
+            median_peers = np.median(self.peer_distance_history)
+            std_peers = np.std(self.peer_distance_history)
+            l2_threshold_peers = median_peers + self.std_dev_multiplier * std_peers
+            self.logger.info(f"Thresholds adaptativos: l2_global={l2_threshold_global:.3f}, l2_peers={l2_threshold_peers:.3f}")
+
+        # 3. Filtrar clientes e preparar para atualizar o histórico
+        clean_updates_indices = []
+        accepted_global_dists = []
+        accepted_peer_dists = []
+
+        for i, dist_info in enumerate(distances):
+            client_id = client_ids[i]
+            l2_g, l2_p, dot = dist_info['l2_global'], dist_info['l2_peers'], dist_info['dot']
+
+            if dot < 0:
+                self.logger.info(f"Cliente {client_id}: REJEITADO (direção invertida, dot={dot:.3f})")
+                continue
+            
+            if l2_g <= l2_threshold_global and l2_p <= l2_threshold_peers:
+                clean_updates_indices.append(i)
+                accepted_global_dists.append(l2_g)
+                accepted_peer_dists.append(l2_p)
+                self.logger.info(f"Cliente {client_id}: ACEITO (l2_global={l2_g:.3f}, l2_peers={l2_p:.3f})")
+            else:
+                self.logger.info(f"Cliente {client_id}: REJEITADO (l2_global={l2_g:.3f}, l2_peers={l2_p:.3f})")
+        
+        # 4. Atualizar o histórico com as distâncias dos clientes aceitos
+        if accepted_global_dists:
+            self.global_distance_history.extend(accepted_global_dists)
+            self.peer_distance_history.extend(accepted_peer_dists)
+
+        return [updates[i] for i in clean_updates_indices]
+
 
 class L2DirectionalClientFilter(ClientFilterStrategy):
     """Filtra clientes com base na distância L2 e na direção do vetor de atualização."""

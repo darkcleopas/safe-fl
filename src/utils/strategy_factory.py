@@ -3,8 +3,8 @@ from typing import Dict, Any, List
 # Importar as novas classes base e implementações
 from src.strategies.abc_strategies import AggregationStrategy, ClientFilterStrategy, GlobalModelFilterStrategy
 from src.strategies.aggregation_strategies import FedAvgStrategy, FedMedianStrategy, TrimmedMeanStrategy
-from src.strategies.client_filter_strategies import L2DirectionalClientFilter, KrumClientFilter, ClusteringClientFilter
-from src.strategies.global_model_filter_strategies import L2GlobalModelFilter
+from src.strategies.client_filter_strategies import AdaptiveL2ClientFilter, KrumClientFilter, ClusteringClientFilter
+from src.strategies.global_model_filter_strategies import AdaptiveL2GlobalModelFilter
 
 class StrategyFactory:
     """Fábrica para criar todos os tipos de estratégias da pipeline de defesa."""
@@ -16,14 +16,14 @@ class StrategyFactory:
     }
     
     CLIENT_FILTER_MAP = {
-        "L2_DIRECTIONAL_FILTER": L2DirectionalClientFilter,
+        "L2_DIRECTIONAL_FILTER": AdaptiveL2ClientFilter,
         "KRUM": KrumClientFilter,
         "MULTI_KRUM": KrumClientFilter, # Usa a mesma classe, mas com config diferente
         "CLUSTERING": ClusteringClientFilter,
     }
     
     GLOBAL_MODEL_FILTER_MAP = {
-        "L2_GLOBAL_MODEL_FILTER": L2GlobalModelFilter,
+        "L2_GLOBAL_MODEL_FILTER": AdaptiveL2GlobalModelFilter,
     }
 
     @staticmethod
