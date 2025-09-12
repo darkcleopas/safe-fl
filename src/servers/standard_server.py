@@ -13,7 +13,7 @@ import inspect
 import time
 import psutil
 
-from src.utils.aggregation_factory import AggregationFactory
+from src.utils.strategy_factory import StrategyFactory
 from src.utils.dataset_factory import DatasetFactory
 from src.utils.model_factory import ModelFactory
 
@@ -58,10 +58,15 @@ class FLServer:
         self.active_clients = []
         
         # Inicializar estratégia de agregação
-        aggregation_strategy_type = self.server_config.get('aggregation_strategy', 'FED_AVG')
-        self.aggregation_strategy = AggregationFactory.create_aggregation_strategy(
-            aggregation_strategy_type, 
-            self.server_config
+        self.defense_pipeline_config = self.server_config.get('defense_pipeline', {})
+        self.client_filters = StrategyFactory.create_client_filters(
+            self.defense_pipeline_config.get('client_filters', [])
+        )
+        self.aggregation_strategy = StrategyFactory.create_aggregation_strategy(
+            self.defense_pipeline_config.get('aggregation_strategy', {'name': 'FED_AVG'})
+        )
+        self.global_model_filter = StrategyFactory.create_global_model_filter(
+            self.defense_pipeline_config.get('global_model_filter')
         )
         
         # Definir seed para reprodutibilidade
@@ -111,8 +116,9 @@ class FLServer:
         self.training_complete = False # Indica se o treinamento foi concluído
         self.round_start_time = None
         self.client_start_times = {}
+        self.previous_global_weights = None
 
-        self.logger.info(f"Servidor inicializado com sucesso usando estratégia de agregação {aggregation_strategy_type}")
+        self.logger.info(f"Servidor inicializado com sucesso.")
     
     def setup_logging(self):
         """Configura o sistema de logging."""
@@ -241,7 +247,7 @@ class FLServer:
         self.logger.info(f"Clientes selecionados para a rodada {round_num}: {selected_clients}")
         return selected_clients
     
-    def aggregate_models(self, updates: List[Tuple[List[np.ndarray], int]]) -> None:
+    def aggregate_models(self, updates: List[Tuple[List[np.ndarray], int]], client_ids: List[int]) -> None:
         """
         Agrega os modelos dos clientes usando a estratégia configurada.
         
@@ -256,41 +262,52 @@ class FLServer:
         # Medir tempo de agregação
         start_time = time.time()
         
-        # try:
-        # Obter os client_ids na ordem das atualizações
-        client_ids = list(self.round_updates.keys())
+        self.logger.info(f"Iniciando pipeline de defesa para {len(updates)} clientes.")
         
-        # Verificar se a estratégia suporta client_ids
-        aggregate_signature = inspect.signature(self.aggregation_strategy.aggregate)
-        supports_client_ids = 'client_ids' in aggregate_signature.parameters
+        # 1. Aplicar filtros de cliente
+        filtered_updates = updates
+        context = {
+            'round': self.current_round,
+            'previous_global_weights': self.previous_global_weights
+        }
+        for client_filter in self.client_filters:
+            if not filtered_updates: break
+            filtered_updates = client_filter.filter(filtered_updates, client_ids, context)
         
-        if supports_client_ids:
-            # Usar a estratégia de agregação configurada com client_ids
-            self.logger.info(f"Usando agregação {self.aggregation_strategy.__class__.__name__} com client_ids: {client_ids}")
-            aggregated_weights = self.aggregation_strategy.aggregate(updates, client_ids=client_ids)
+        self.logger.info(f"{len(filtered_updates)} de {len(updates)} clientes passaram nos filtros.")
+
+        if not filtered_updates:
+            self.logger.warning("Nenhum cliente passou pelos filtros, pulando atualização do modelo global.")
+            # Medir tempo e memória após agregação
+            aggregation_time = time.time() - start_time
+            memory_after = process.memory_info().rss / 1024 / 1024  # MB
+            memory_peak = memory_after - memory_before
+
+            # Armazenar métricas
+            self.metrics['aggregation_time'].append(aggregation_time)
+            self.metrics['memory_usage'].append(memory_peak)
+            return
+
+        # 2. Agregar os modelos restantes
+        new_aggregated_weights = self.aggregation_strategy.aggregate(filtered_updates)
+
+        # 3. Aplicar filtro do modelo global
+        should_update = True
+        if self.global_model_filter:
+            # O filtro precisa do estado anterior do modelo *antes* da atualização
+            old_weights = self.model.get_weights() 
+            should_update = self.global_model_filter.should_update(new_aggregated_weights, old_weights, context)
+        
+        if should_update:
+            self.model.set_weights(new_aggregated_weights)
+            # Armazena os novos pesos para a próxima rodada
+            self.previous_global_weights = [w.copy() for w in new_aggregated_weights]
+            self.logger.info("Modelo global atualizado com sucesso.")
+            if self.save_intermediate_server_models:
+                path = f'{self.intermediate_server_models_dir}/model_global_round_{self.current_round}.h5'
+                self.model.save(path)
         else:
-            # Fallback para estratégias que não suportam client_ids
-            self.logger.info(f"Usando agregação {self.aggregation_strategy.__class__.__name__}")
-            aggregated_weights = self.aggregation_strategy.aggregate(updates)
-        
-        # Aplicar os novos pesos ao modelo global
-        self.model.set_weights(aggregated_weights)
-        
-        if self.save_intermediate_server_models:
-            # Salvar o modelo global atualizado
-            global_model_path = f'{self.intermediate_server_models_dir}/model_global_round_{self.current_round}.h5'
-            self.model.save(global_model_path)
-            self.logger.info(f"Modelo global atualizado e salvo em {global_model_path}")
-            
-        # except Exception as e:
-        #     self.logger.error(f"Erro durante a agregação: {str(e)}")
-        #     self.logger.warning("Utilizando FedAvg como estratégia de fallback")
-            
-        #     # Fallback para FedAvg em caso de erro
-        #     from src.strategies.aggregation_strategies import FedAvgStrategy
-        #     fedavg_strategy = FedAvgStrategy()
-        #     aggregated_weights = fedavg_strategy.aggregate(updates)
-        #     self.model.set_weights(aggregated_weights)
+            self.logger.warning("Atualização do modelo global foi REJEITADA pela pipeline.")
 
         # Medir tempo e memória após agregação
         aggregation_time = time.time() - start_time
@@ -301,8 +318,7 @@ class FLServer:
         self.metrics['aggregation_time'].append(aggregation_time)
         self.metrics['memory_usage'].append(memory_peak)
 
-        self.logger.info(f"Tempo de agregação: {aggregation_time:.3f}s")
-        self.logger.info(f"Pico de memória durante agregação: {memory_peak:.2f} MB")
+        self.logger.info(f"Pipeline de defesa concluída em {aggregation_time:.3f}s.")
     
     def evaluate_model(self) -> Dict[str, float]:
         """
@@ -486,10 +502,11 @@ class FLServer:
         if set(self.round_updates.keys()) == set(self.selected_clients):
             self.logger.info(f"Todas as atualizações recebidas para a rodada {self.current_round}")
             
-            # Agregar modelos
-            updates = [(self.round_updates[client_id][0], self.round_updates[client_id][1]) 
-                       for client_id in self.selected_clients]
-            self.aggregate_models(updates)
+            # Garante que os updates estão na mesma ordem dos client_ids
+            client_ids_in_order = self.selected_clients
+            updates_in_order = [self.round_updates[cid] for cid in client_ids_in_order]
+
+            self.aggregate_models(updates_in_order, client_ids_in_order)
 
             # Limpar a memória após a agregação
             gc.collect()

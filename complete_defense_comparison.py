@@ -25,30 +25,129 @@ from fl_simulator import FLSimulator
 
 class DefenseComparisonRunner:
     """Runner para comparação completa de defesas."""
-    
-    def __init__(self, load_results_dir=None):
-        self.defenses = ['COSINE_SIMILARITY', 'FED_AVG', 'TRIMMED_MEAN', 'KRUM', 'MULTI_KRUM', 'CLUSTERING']
-        self.attack_rates = [0.0, 0.2, 0.4, 0.6, 0.8]
-        self.selection_fractions = [0.4, 1.0]
+
+    def __init__(self, load_results_dir=None, load_only_mode=False):
+        self.defense_pipelines = {
+        #     # --- GRUPO 1: Baselines (Sem Filtros de Cliente) ---
+        #     # Objetivo: Medir a performance base e o efeito de agregadores robustos.
+
+        #     'Média Ponderada (Baseline)': {
+        #         'client_filters': [],
+        #         'aggregation_strategy': {'name': 'FED_AVG', 'params': {}},
+        #         'global_model_filter': None
+        #     },
+        #     'Média Aparada': {
+        #         'client_filters': [],
+        #         'aggregation_strategy': {'name': 'TRIMMED_MEAN', 'params': {'trim_ratio': 0.4}},
+        #         'global_model_filter': None
+        #     },
+
+        #     # --- GRUPO 2: Filtros de Cliente + Agregação Padrão ---
+        #     # Objetivo: Isolar e medir a eficácia de cada filtro de cliente.
+
+        #     'Filtro Krum + Média Ponderada': {
+        #         'client_filters': [{'name': 'KRUM', 'params': {}}],
+        #         'aggregation_strategy': {'name': 'FED_AVG'},
+        #         'global_model_filter': None
+        #     },
+        #     'Filtro Multi-Krum + Média Ponderada': {
+        #         'client_filters': [{'name': 'MULTI_KRUM', 'params': {}}],
+        #         'aggregation_strategy': {'name': 'FED_AVG'},
+        #         'global_model_filter': None
+        #     },
+        #     'Filtro Clustering + Média Ponderada': {
+        #         'client_filters': [{'name': 'CLUSTERING', 'params': {}}],
+        #         'aggregation_strategy': {'name': 'FED_AVG'},
+        #         'global_model_filter': None
+        #     },
+        #     'Filtro L2 Direcional + Média Ponderada': {
+        #         'client_filters': [{
+        #             'name': 'L2_DIRECTIONAL_FILTER',
+        #             'params': {'min_rounds': 3, 'l2_threshold_global': 2.3, 'l2_threshold_peers': 2.0}
+        #         }],
+        #         'aggregation_strategy': {'name': 'FED_AVG'},
+        #         'global_model_filter': None
+        #     },
+
+        #     # --- GRUPO 3: Pipelines de Defesa em Múltiplas Camadas ---
+        #     # Objetivo: Testar o efeito combinado de diferentes tipos de filtros e agregadores.
+
+            # 'Média Ponderada + Filtro L2 Global': {
+            #     'client_filters': [],
+            #     'aggregation_strategy': {'name': 'FED_AVG'},
+            #     'global_model_filter': {
+            #         'name': 'L2_GLOBAL_MODEL_FILTER',
+            #         'params': {'min_rounds': 5, 'update_threshold': 15.0}
+            #     }
+            # },
+            'Filtro L2 Direcional + Média Ponderada + Filtro L2 Global': {
+                'client_filters': [{
+                    'name': 'L2_DIRECTIONAL_FILTER',
+                    'params': {'min_rounds': 5, 'l2_threshold_global': 2.3, 'l2_threshold_peers': 2.0}
+                }],
+                'aggregation_strategy': {'name': 'FED_AVG'},
+                'global_model_filter': {
+                    'name': 'L2_GLOBAL_MODEL_FILTER',
+                    'params': {'min_rounds': 5, 'update_threshold': 15.0}
+                }
+            }
+        }
+        
+        # self.defense_pipelines = {
+            # 'Sem Defesaa': {
+            #     'client_filters': None,
+            #     'aggregation_strategy': {'name': 'FED_AVG'},
+            #     'global_model_filter': {'name': 'L2_GLOBAL_MODEL_FILTER', 'params': {'update_threshold': 8.0, 'min_rounds': 2}}
+            # },
+            # 'CosineSim': {
+            #     'client_filters': [{
+            #         'name': 'L2_DIRECTIONAL_FILTER',
+            #         'params': {'min_rounds': 2, 'l2_threshold_global': 2.3, 'l2_threshold_peers': 2.0}
+            #     }],
+            #     'aggregation_strategy': {'name': 'FED_AVG'},
+            #     'global_model_filter': {'name': 'L2_GLOBAL_MODEL_FILTER', 'params': {'update_threshold': 2.0}}
+            # },
+            # 'TrimmedMean': {
+            #     'client_filters': [],
+            #     'aggregation_strategy': {'name': 'TRIMMED_MEAN', 'params': {'trim_ratio': 0.4}},
+            # },
+            # 'Krum': {
+            #     'client_filters': [{'name': 'KRUM', 'params': {}}],
+            #     'aggregation_strategy': {'name': 'FED_AVG'}, # Krum seleciona 1, FedAvg apenas o retorna
+            # },
+            # 'MultiKrum': {
+            #     'client_filters': [{'name': 'MULTI_KRUM', 'params': {}}],
+            #     'aggregation_strategy': {'name': 'FED_AVG'}, # MultiKrum seleciona m, FedAvg faz a média
+            # },
+            # 'Clustering': {
+            #     'client_filters': [{'name': 'CLUSTERING', 'params': {}}],
+            #     'aggregation_strategy': {'name': 'FED_AVG'},
+            # }
+        # }
+        self.defenses = list(self.defense_pipelines.keys())
+        self.attack_rates = [0.0] #[0.0, 0.2, 0.4, 0.6, 0.8]
+        self.selection_fractions = [0.4] #[0.4, 1.0]
         
         # Configurações fixas
-        self.rounds = 50
+        self.rounds = 30
         self.num_clients = 15
-        self.local_epochs = 3
-        self.batch_size = 64
+        self.local_epochs = 2
+        self.batch_size = 16
         self.save_client_models = False  # Salvar modelos dos clientes após cada round
         self.save_server_intermediate_models = False  # Salvar modelos intermediários do servidor
 
         # Definir diretório base
         if load_results_dir:
             self.base_dir = Path(load_results_dir)
-            self.load_only_mode = True
-            print(f"🔄 Modo carregamento: {self.base_dir}")
         else:
             self.base_dir = Path(f'simulation_{datetime.now().strftime("%Y%m%d_%H%M%S")}')
-            self.load_only_mode = False
-            print(f"🆕 Modo execução: {self.base_dir}")
         
+        self.load_only_mode = load_only_mode
+        if self.load_only_mode:
+            print(f"🔄 Modo carregamento: {self.base_dir}")
+        else:
+            print(f"🆕 Modo execução: {self.base_dir}")
+
         # Diretórios
         self.config_dir = self.base_dir / 'config'
         self.results_dir = self.base_dir / 'results'
@@ -69,18 +168,18 @@ class DefenseComparisonRunner:
         self.all_results = {}
         self.existing_results = {}
         
-    def create_config(self, defense, attack_rate, selection_fraction):
+    def create_config(self, defense_name, attack_rate, selection_fraction):
         """Cria configuração para um experimento específico."""
         
         # Nome do experimento
-        attack_name = "no_attack" if attack_rate == 0.0 else f"label_flipping_{int(attack_rate*100)}"
-        selection_name = "all_clients" if selection_fraction == 1.0 else f"sel_{int(selection_fraction*100)}"
-        exp_name = f"{attack_name}_{defense.lower()}_{selection_name}"
+        attack_name_part = "no_attack" if attack_rate == 0.0 else f"label_flipping_{int(attack_rate*100)}"
+        selection_name_part = "all_clients" if selection_fraction == 1.0 else f"sel_{int(selection_fraction*100)}"
+        exp_name = f"{attack_name_part}_{defense_name.lower()}_{selection_name_part}"
         
         config = {
             'experiment': {
                 'name': exp_name,
-                'description': f"{defense} vs {int(attack_rate*100)}% label flipping (sel: {int(selection_fraction*100)}%)",
+                'description': f"{defense_name} vs {int(attack_rate*100)}% label flipping (sel: {int(selection_fraction*100)}%)",
                 'seed': 42,
                 'rounds': self.rounds,
                 'output_dir': str(self.results_dir),
@@ -100,7 +199,7 @@ class DefenseComparisonRunner:
             'server': {
                 'type': 'standard',
                 'address': '0.0.0.0:8000',
-                'aggregation_strategy': defense,
+                'defense_pipeline': self.defense_pipelines[defense_name],
                 'selection_strategy': 'random',
                 'selection_fraction': selection_fraction,
                 'evaluation_interval': 1,
@@ -113,17 +212,6 @@ class DefenseComparisonRunner:
                 'malicious_percentage': attack_rate
             }
         }
-        
-        # Configurações específicas por defesa
-        if defense == 'TRIMMED_MEAN':
-            config['server']['trim_ratio'] = 0.4
-        elif defense == 'COSINE_SIMILARITY':
-            config['server'].update({
-                'min_rounds': 5,
-                'l2_threshold_global': 2.3,
-                'l2_threshold_peers': 2.0,
-                'fallback_strategy': 'FED_AVG'
-            })
         
         return config, exp_name
     
@@ -240,19 +328,14 @@ class DefenseComparisonRunner:
         return merged_results
     
     def generate_all_configs(self):
-        """Gera todas as configurações necessárias."""
-        
         configs = {}
         total_experiments = len(self.defenses) * len(self.attack_rates) * len(self.selection_fractions)
-        
         print(f"📝 Gerando {total_experiments} configurações...")
-        
-        for defense in self.defenses:
+        for defense_name in self.defenses:
             for attack_rate in self.attack_rates:
                 for selection_fraction in self.selection_fractions:
-                    config, exp_name = self.create_config(defense, attack_rate, selection_fraction)
+                    config, exp_name = self.create_config(defense_name, attack_rate, selection_fraction)
                     
-                    # Salvar arquivo apenas se não estivermos em modo load-only
                     if not self.load_only_mode:
                         config_path = self.config_dir / f'{exp_name}.yaml'
                         with open(config_path, 'w') as f:
@@ -262,21 +345,19 @@ class DefenseComparisonRunner:
                     
                     configs[exp_name] = {
                         'config_path': str(config_path) if config_path else None,
-                        'defense': defense,
+                        'defense': defense_name,
                         'attack_rate': attack_rate,
                         'selection_fraction': selection_fraction
                     }
-        
         if not self.load_only_mode:
             print(f"✅ {len(configs)} configurações criadas em {self.config_dir}")
-        
         return configs
     
     def estimate_time(self, configs):
         """Estima tempo total baseado em experiência anterior."""
         
         # Estimativas baseadas no número de rounds (linear)
-        base_time_per_round = 6  # segundos por round (estimativa conservadora)
+        base_time_per_round = 5  # segundos por round (estimativa conservadora)
         time_per_round = 0
         num_clients_over_selection = [int(self.num_clients * s) for s in self.selection_fractions]
         for num_clients in num_clients_over_selection:
@@ -992,7 +1073,12 @@ Exemplos de uso:
         type=str,
         help='Diretório contendo resultados existentes para análise (pula execução de novos experimentos)'
     )
-    
+    parser.add_argument(
+        '--load_only_mode',
+        action='store_true',
+        help='Ativa o modo de carregamento apenas (não executa novos experimentos)'
+    )
+
     return parser.parse_args()
 
 
@@ -1001,8 +1087,8 @@ def main():
     args = parse_arguments()
     
     # Criar runner com modo apropriado
-    runner = DefenseComparisonRunner(load_results_dir=args.load_result_dir)
-    
+    runner = DefenseComparisonRunner(load_results_dir=args.load_result_dir, load_only_mode=args.load_only_mode)
+
     # Executar análise
     results, breaking_points = runner.run_complete_analysis()
     

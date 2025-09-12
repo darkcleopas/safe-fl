@@ -217,7 +217,7 @@ class FLSimulator:
                 weights, num_examples, local_loss, local_accuracy = self._train_client(client, global_weights)
 
                 # Armazenar atualização
-                self.server.round_updates[client_id] = (weights, num_examples, local_loss, local_accuracy)
+                self.server.round_updates[client_id] = (weights, num_examples)
 
                 # Salvar modelo do cliente se a flag estiver ativada
                 if self.save_client_models:
