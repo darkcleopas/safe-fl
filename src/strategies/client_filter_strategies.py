@@ -20,6 +20,7 @@ class AdaptiveL2ClientFilter(ClientFilterStrategy):
         self.window_size = self.config.get('window_size', 7)
         self.std_dev_multiplier = self.config.get('std_dev_multiplier', 1.5)
         self.min_rounds_history = self.config.get('min_rounds_history', 5)
+        self.history_clipping_quantile = self.config.get('history_clipping_quantile', 0.95)
 
         # Deques para armazenar o histórico de distâncias (apenas clientes aceitos)
         self.global_distance_history: Deque[float] = deque(maxlen=self.window_size)
@@ -32,16 +33,16 @@ class AdaptiveL2ClientFilter(ClientFilterStrategy):
         server_context: Dict[str, Any]
     ) -> List[Tuple[List[np.ndarray], int]]:
         
-        current_round = server_context.get('round', 0)
+        num_clients = len(updates)
         previous_global_weights = server_context.get('previous_global_weights')
 
-        if not updates:
+        if num_clients == 0:
             return []
 
         if previous_global_weights is None:
             self.logger.warning("Filtro L2 Adaptativo: Sem pesos globais anteriores, todos os clientes aprovados.")
             return updates
-
+        
         # 1. Calcular todas as distâncias primeiro
         global_flat = np.concatenate([w.flatten() for w in previous_global_weights])
         all_flat_updates = [
@@ -49,62 +50,80 @@ class AdaptiveL2ClientFilter(ClientFilterStrategy):
             for weights, _ in updates
         ]
 
-        distances = []
+        median_of_all_updates = np.median(all_flat_updates, axis=0)
+
+        median_update_vector = median_of_all_updates - global_flat
+        norm_median_update = np.linalg.norm(median_update_vector)
+        if norm_median_update > 1e-9: # Evitar divisão por zero
+            median_update_direction = median_update_vector / norm_median_update
+        else:
+            median_update_direction = None # Não há direção clara se a mediana não mudou
+
+        # 2. Calcular distâncias e direção para cada cliente
+        all_distances = []
+
         for i, current_flat in enumerate(all_flat_updates):
-            # Verificação de direção
-            dot_product = np.dot(current_flat, global_flat)
-            if dot_product < 0:
-                distances.append({'l2_global': float('inf'), 'l2_peers': float('inf'), 'dot': dot_product})
-                continue
-
-            l2_global = np.linalg.norm(current_flat - global_flat)
+            client_update_vector = current_flat - global_flat
             
-            peer_updates = all_flat_updates[:i] + all_flat_updates[i+1:]
-            l2_peers = np.linalg.norm(current_flat - np.median(peer_updates, axis=0)) if peer_updates else 0.0
-            
-            distances.append({'l2_global': l2_global, 'l2_peers': l2_peers, 'dot': dot_product})
+            direction_score = 1.0 # Padrão para aceitar se não for possível calcular
+            if median_update_direction is not None:
+                direction_score = np.dot(client_update_vector, median_update_direction)
 
-        # 2. Calcular os thresholds adaptativos
+            l2_global = np.linalg.norm(client_update_vector)
+            l2_peers = np.linalg.norm(current_flat - median_of_all_updates)
+            
+            all_distances.append({'l2_global': l2_global, 'l2_peers': l2_peers, 'direction': direction_score})
+
+        # 3. Calcular thresholds adaptativos
         if len(self.global_distance_history) < self.min_rounds_history:
-            # Em rodadas iniciais, usa um threshold muito alto para aceitar a maioria
             l2_threshold_global = float('inf')
             l2_threshold_peers = float('inf')
             self.logger.info(f"Filtro L2 Adaptativo: Pouco histórico ({len(self.global_distance_history)} < {self.min_rounds_history}). Usando thresholds permissivos.")
         else:
-            median_global = np.median(self.global_distance_history)
-            std_global = np.std(self.global_distance_history)
+            median_global = np.median(list(self.global_distance_history))
+            std_global = np.std(list(self.global_distance_history))
             l2_threshold_global = median_global + self.std_dev_multiplier * std_global
 
-            median_peers = np.median(self.peer_distance_history)
-            std_peers = np.std(self.peer_distance_history)
+            median_peers = np.median(list(self.peer_distance_history))
+            std_peers = np.std(list(self.peer_distance_history))
             l2_threshold_peers = median_peers + self.std_dev_multiplier * std_peers
             self.logger.info(f"Thresholds adaptativos: l2_global={l2_threshold_global:.3f}, l2_peers={l2_threshold_peers:.3f}")
 
-        # 3. Filtrar clientes e preparar para atualizar o histórico
+        # 4. Filtrar clientes
         clean_updates_indices = []
         accepted_global_dists = []
         accepted_peer_dists = []
 
-        for i, dist_info in enumerate(distances):
+        for i, dist_info in enumerate(all_distances):
             client_id = client_ids[i]
-            l2_g, l2_p, dot = dist_info['l2_global'], dist_info['l2_peers'], dist_info['dot']
+            l2_g, l2_p, direction = dist_info['l2_global'], dist_info['l2_peers'], dist_info['direction']
 
-            if dot < 0:
-                self.logger.info(f"Cliente {client_id}: REJEITADO (direção invertida, dot={dot:.3f})")
-                continue
-            
-            if l2_g <= l2_threshold_global and l2_p <= l2_threshold_peers:
+            rejection_reason = ""
+            if direction < 0:
+                rejection_reason = f"direção oposta (score={direction:.3f})"
+            elif l2_g > l2_threshold_global:
+                rejection_reason = f"distância global muito alta (l2_g={l2_g:.3f} > {l2_threshold_global:.3f})"
+            elif l2_p > l2_threshold_peers:
+                rejection_reason = f"distância de pares muito alta (l2_p={l2_p:.3f} > {l2_threshold_peers:.3f})"
+
+            if not rejection_reason:
                 clean_updates_indices.append(i)
                 accepted_global_dists.append(l2_g)
                 accepted_peer_dists.append(l2_p)
-                self.logger.info(f"Cliente {client_id}: ACEITO (l2_global={l2_g:.3f}, l2_peers={l2_p:.3f})")
+                self.logger.info(f"Cliente {client_id}: ACEITO (l2_global={l2_g:.3f}, l2_peers={l2_p:.3f}, dir_score={direction:.3f})")
             else:
-                self.logger.info(f"Cliente {client_id}: REJEITADO (l2_global={l2_g:.3f}, l2_peers={l2_p:.3f})")
+                self.logger.info(f"Cliente {client_id}: REJEITADO ({rejection_reason})")
         
-        # 4. Atualizar o histórico com as distâncias dos clientes aceitos
-        if accepted_global_dists:
-            self.global_distance_history.extend(accepted_global_dists)
-            self.peer_distance_history.extend(accepted_peer_dists)
+        # Pega as distâncias de todos os clientes da rodada
+        all_round_global_dists = [d['l2_global'] for d in all_distances]
+        all_round_peer_dists = [d['l2_peers'] for d in all_distances]
+        
+        # Limita o impacto de outliers extremos no histórico
+        clip_g = np.quantile(all_round_global_dists, self.history_clipping_quantile)
+        clip_p = np.quantile(all_round_peer_dists, self.history_clipping_quantile)
+        
+        self.global_distance_history.extend(np.clip(all_round_global_dists, a_min=0, a_max=clip_g))
+        self.peer_distance_history.extend(np.clip(all_round_peer_dists, a_min=0, a_max=clip_p))
 
         return [updates[i] for i in clean_updates_indices]
 

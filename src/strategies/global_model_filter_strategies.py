@@ -15,6 +15,8 @@ class AdaptiveL2GlobalModelFilter(GlobalModelFilterStrategy):
         self.window_size = self.config.get('window_size', 7)
         self.std_dev_multiplier = self.config.get('std_dev_multiplier', 1.5)
         self.min_rounds_history = self.config.get('min_rounds_history', 5)
+        self.rejection_penalty_increase = self.config.get('rejection_penalty_increase', 0.25)
+        self.consecutive_rejections = 0
 
         # Deque para armazenar o histórico de distâncias das atualizações globais
         self.update_distance_history: Deque[float] = deque(maxlen=self.window_size)
@@ -25,7 +27,7 @@ class AdaptiveL2GlobalModelFilter(GlobalModelFilterStrategy):
         old_global_weights: List[np.ndarray],
         server_context: Dict[str, Any]
     ) -> bool:
-        if server_context.get('previous_global_weights') is None:
+        if old_global_weights is None:
             self.logger.info("Filtro L2 Global Adaptativo: Sem modelo anterior, atualização aceita.")
             return True
         
@@ -34,22 +36,28 @@ class AdaptiveL2GlobalModelFilter(GlobalModelFilterStrategy):
         old_flat = np.concatenate([w.flatten() for w in old_global_weights])
         distance = np.linalg.norm(new_flat - old_flat)
 
-        current_round = server_context.get('round', 0)
-        if current_round < self.min_rounds_history:
-            self.logger.info(f"Filtro L2 Global Adaptativo: Round {current_round} < {self.min_rounds_history}, atualização aceita.")
+        if len(self.update_distance_history) < self.min_rounds_history:
+            self.logger.info(f"Filtro L2 Global: Fase de aquecimento ({len(self.update_distance_history)}/{self.min_rounds_history}), atualização aceita.")
             self.update_distance_history.append(distance)
+            self.consecutive_rejections = 0 # Reseta o contador
             return True
         
-        median_dist = np.median(self.update_distance_history)
-        std_dist = np.std(self.update_distance_history)
-        adaptive_threshold = median_dist + self.std_dev_multiplier * std_dist
+        current_multiplier = self.std_dev_multiplier + (self.consecutive_rejections * self.rejection_penalty_increase)
+        median_dist = np.median(list(self.update_distance_history))
+        std_dist = np.std(list(self.update_distance_history))
+        adaptive_threshold = median_dist + current_multiplier * std_dist
+
+        if self.consecutive_rejections > 0:
+            self.logger.info(f"Filtro L2 Global: Tolerância aumentada devido a {self.consecutive_rejections} rejeição(ões) consecutiva(s). Multiplicador atual: {current_multiplier:.2f}")
         
         if distance <= adaptive_threshold:
-            self.logger.info(f"Filtro L2 Global: Atualização ACEITA (dist={distance:.3f} <= {adaptive_threshold:.3f})")
-            self.update_distance_history.append(distance) # Adiciona ao histórico
+            self.logger.info(f"Filtro L2 Global: Atualização ACEITA (dist={distance:.4f} <= threshold={adaptive_threshold:.4f})")
+            self.update_distance_history.append(distance)
+            self.consecutive_rejections = 0 # Reseta o contador de rejeições
             return True
         else:
-            self.logger.warning(f"Filtro L2 Global: Atualização REJEITADA (dist={distance:.3f} > {adaptive_threshold:.3f})")
+            self.logger.warning(f"Filtro L2 Global: Atualização REJEITADA (dist={distance:.4f} > threshold={adaptive_threshold:.4f})")
+            self.consecutive_rejections += 1 # Incrementa o contador de rejeições
             return False
 
 class L2GlobalModelFilter(GlobalModelFilterStrategy):
