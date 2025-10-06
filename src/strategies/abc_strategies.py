@@ -34,7 +34,7 @@ class ClientFilterStrategy(BaseStrategy):
         updates: List[Tuple[List[np.ndarray], int]], 
         client_ids: List[int],
         server_context: Dict[str, Any]
-    ) -> List[Tuple[List[np.ndarray], int]]:
+    ) -> Tuple[List[Tuple[List[np.ndarray], int]], List[int]]:
         """Filtra as atualizações dos clientes, retornando apenas as aprovadas."""
         pass
 

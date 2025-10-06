@@ -177,3 +177,5 @@ client_models/
 logs/
 experiment_results/
 config/
+simulations/
+simulation*

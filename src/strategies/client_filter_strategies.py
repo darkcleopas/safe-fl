@@ -31,17 +31,17 @@ class AdaptiveL2ClientFilter(ClientFilterStrategy):
         updates: List[Tuple[List[np.ndarray], int]], 
         client_ids: List[int], 
         server_context: Dict[str, Any]
-    ) -> List[Tuple[List[np.ndarray], int]]:
+    ) -> Tuple[List[Tuple[List[np.ndarray], int]], List[int]]:
         
         num_clients = len(updates)
         previous_global_weights = server_context.get('previous_global_weights')
 
         if num_clients == 0:
-            return []
+            return [], []
 
         if previous_global_weights is None:
             self.logger.warning("Filtro L2 Adaptativo: Sem pesos globais anteriores, todos os clientes aprovados.")
-            return updates
+            return updates, client_ids
         
         # 1. Calcular todas as distâncias primeiro
         global_flat = np.concatenate([w.flatten() for w in previous_global_weights])
@@ -125,7 +125,9 @@ class AdaptiveL2ClientFilter(ClientFilterStrategy):
         self.global_distance_history.extend(np.clip(all_round_global_dists, a_min=0, a_max=clip_g))
         self.peer_distance_history.extend(np.clip(all_round_peer_dists, a_min=0, a_max=clip_p))
 
-        return [updates[i] for i in clean_updates_indices]
+        filtered_updates = [updates[i] for i in clean_updates_indices]
+        filtered_ids = [client_ids[i] for i in clean_updates_indices]
+        return filtered_updates, filtered_ids
 
 
 class L2DirectionalClientFilter(ClientFilterStrategy):
@@ -142,18 +144,18 @@ class L2DirectionalClientFilter(ClientFilterStrategy):
         updates: List[Tuple[List[np.ndarray], int]], 
         client_ids: List[int], 
         server_context: Dict[str, Any]
-    ) -> List[Tuple[List[np.ndarray], int]]:
+    ) -> Tuple[List[Tuple[List[np.ndarray], int]], List[int]]:
         
         current_round = server_context.get('round', 0)
         previous_global_weights = server_context.get('previous_global_weights')
 
         if current_round < self.min_rounds:
             self.logger.info(f"Filtro L2: Round {current_round} < {self.min_rounds}, todos os clientes aprovados.")
-            return updates
+            return updates, client_ids
 
         if previous_global_weights is None:
             self.logger.warning("Filtro L2: Sem pesos globais anteriores, todos os clientes aprovados.")
-            return updates
+            return updates, client_ids
 
         clean_updates_indices = []
         global_flat = np.concatenate([w.flatten() for w in previous_global_weights])
@@ -187,7 +189,9 @@ class L2DirectionalClientFilter(ClientFilterStrategy):
             else:
                 self.logger.info(f"Cliente {client_id}: REJEITADO (l2_global={l2_global:.3f}, l2_peers={l2_peers:.3f})")
 
-        return [updates[i] for i in clean_updates_indices]
+        filtered_updates = [updates[i] for i in clean_updates_indices]
+        filtered_ids = [client_ids[i] for i in clean_updates_indices]
+        return filtered_updates, filtered_ids
 
 
 class KrumClientFilter(ClientFilterStrategy):
@@ -204,14 +208,14 @@ class KrumClientFilter(ClientFilterStrategy):
         updates: List[Tuple[List[np.ndarray], int]], 
         client_ids: List[int], 
         server_context: Dict[str, Any]
-    ) -> List[Tuple[List[np.ndarray], int]]:
+    ) -> Tuple[List[Tuple[List[np.ndarray], int]], List[int]]:
         
         all_weights = [w for w, _ in updates]
         num_models = len(all_weights)
         
         if num_models < 3:
             self.logger.warning(f"Krum: Número insuficiente de modelos ({num_models}), todos aprovados.")
-            return updates
+            return updates, client_ids
         
         num_malicious = self.num_malicious
         if num_malicious is None:
@@ -238,7 +242,9 @@ class KrumClientFilter(ClientFilterStrategy):
             selected_indices = [best_model_idx]
             self.logger.info(f"Krum selecionou cliente (índice): {selected_indices[0]}")
 
-        return [updates[i] for i in selected_indices]
+        filtered_updates = [updates[i] for i in selected_indices]
+        filtered_ids = [client_ids[i] for i in selected_indices]
+        return filtered_updates, filtered_ids
 
 
 class ClusteringClientFilter(ClientFilterStrategy):
@@ -249,13 +255,13 @@ class ClusteringClientFilter(ClientFilterStrategy):
         updates: List[Tuple[List[np.ndarray], int]], 
         client_ids: List[int], 
         server_context: Dict[str, Any]
-    ) -> List[Tuple[List[np.ndarray], int]]:
+    ) -> Tuple[List[Tuple[List[np.ndarray], int]], List[int]]:
 
         all_weights = [w for w, _ in updates]
         num_models = len(all_weights)
         
         if num_models <= 2:
-            return updates
+            return updates, client_ids
 
         flattened_models = [np.concatenate([w.flatten() for w in model]) for model in all_weights]
         similarity_matrix = np.zeros((num_models, num_models))
@@ -284,7 +290,9 @@ class ClusteringClientFilter(ClientFilterStrategy):
             biggest_cluster_indices = cluster_1_indices if len(cluster_1_indices) >= len(cluster_2_indices) else cluster_2_indices
             self.logger.info(f"Clustering selecionou {len(biggest_cluster_indices)} clientes.")
             
-            return [updates[i] for i in biggest_cluster_indices]
+            filtered_updates = [updates[i] for i in biggest_cluster_indices]
+            filtered_ids = [client_ids[i] for i in biggest_cluster_indices]
+            return filtered_updates, filtered_ids
         except Exception as e:
             self.logger.error(f"Erro no clustering: {e}. Retornando todos os updates.")
-            return updates
+            return updates, client_ids

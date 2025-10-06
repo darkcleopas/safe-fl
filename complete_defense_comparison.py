@@ -88,6 +88,13 @@ class ResultAnalyzer:
                                 metrics = json.load(f)
                             with open(config_file, 'r') as f:
                                 config = yaml.safe_load(f)
+                            
+                            malicious_clients = []
+                            malicious_file = exp_dir / 'malicious_clients.json'
+                            if malicious_file.exists():
+                                with open(malicious_file, 'r') as f:
+                                    malicious_data = json.load(f)
+                                    malicious_clients = malicious_data.get('malicious_clients', [])
 
                             # Extrai metadados do config.yaml
                             exp_name = config.get('experiment', {}).get('name', exp_dir.name)
@@ -103,6 +110,7 @@ class ResultAnalyzer:
                                 'defense': defense_name,
                                 'attack_rate': attack_rate,
                                 'selection_fraction': sel_frac,
+                                'malicious_clients': malicious_clients,
                                 'metrics': metrics,
                                 'final_accuracy': metrics.get('accuracy', [0.0])[-1],
                                 'final_loss': metrics.get('loss', [float('inf')])[-1],
@@ -116,6 +124,76 @@ class ResultAnalyzer:
              print("❌ Nenhum resultado para analisar.")
              return False
         return True
+    
+    def run_full_analysis(self):
+        """Executa o pipeline completo de análise: carregar dados, processar e criar plots."""
+        if self.load_results():
+            # NOVO: Instancia o processador para gerar DataFrame e gráficos
+            processor = ResultProcessor(self.all_results, self.plots_dir, self.results_dir)
+            processor.generate_and_save_dataframe()
+            processor.create_all_plots()
+        else:
+            print("Análise interrompida.")
+
+
+class ResultProcessor:
+    def __init__(self, all_results, plots_dir, results_dir):
+        self.all_results = all_results
+        self.plots_dir = plots_dir
+        self.results_dir = results_dir
+
+    def generate_and_save_dataframe(self):
+        """
+        Converte os resultados carregados em um DataFrame Pandas e o salva em um arquivo CSV.
+        """
+        if not self.all_results:
+            print("⚠️ Sem dados para criar o DataFrame.")
+            return
+
+        all_experiments_data = []
+        for exp_id, exp_details in self.all_results.items():
+            if not exp_details.get('success', False):
+                continue
+
+            metrics = exp_details.get("metrics", {})
+            num_rounds = len(metrics.get("rounds", []))
+
+            if num_rounds == 0:
+                continue
+
+            # Converte a lista de clientes maliciosos para uma string para fácil armazenamento no CSV
+            malicious_clients_str = str(exp_details.get("malicious_clients", []))
+
+            for i in range(num_rounds):
+                # Usar .get() com um valor padrão seguro para evitar erros
+                default_list = [None] * num_rounds
+                default_bool_list = [False] * num_rounds
+
+                round_data = {
+                    "experiment_id": exp_id,
+                    "defense": exp_details.get("defense"),
+                    "attack_rate": exp_details.get("attack_rate"),
+                    "selection_fraction": exp_details.get("selection_fraction"),
+                    "malicious_clients": malicious_clients_str,
+                    "round": metrics.get("rounds")[i],
+                    "accuracy": metrics.get("accuracy")[i],
+                    "loss": metrics.get("loss")[i],
+                    "aggregation_time": metrics.get("aggregation_time", default_list)[i],
+                    "round_time": metrics.get("round_time", default_list)[i],
+                    "communication_bytes": metrics.get("communication_bytes", default_list)[i],
+                    "selected_clients": str(metrics.get("selected_clients", default_list)[i]),
+                    "aggregated_clients": str(metrics.get("aggregated_clients", default_list)[i]),
+                    "model_updated": metrics.get("model_updated", default_bool_list)[i],
+                    "final_accuracy": exp_details.get("final_accuracy"),
+                    "final_loss": exp_details.get("final_loss"),
+                    "success": exp_details.get("success"),
+                }
+                all_experiments_data.append(round_data)
+
+        df = pd.DataFrame(all_experiments_data)
+        df_path = self.results_dir / 'results_summary.csv'
+        df.to_csv(df_path, index=False)
+        print(f"\n✅ DataFrame com {len(df)} linhas salvo em: {df_path}")
 
     def create_all_plots(self):
         """
@@ -127,9 +205,7 @@ class ResultAnalyzer:
 
         print("\n🎨 Iniciando a criação de todos os gráficos...")
 
-        # Prepara dados e estilos
         perf_data = []
-        cost_data = []
         for result in self.all_results.values():
             if result.get('success'):
                 common_info = {
@@ -139,16 +215,8 @@ class ResultAnalyzer:
                     'final_accuracy': result.get('final_accuracy', 0.0),
                 }
                 perf_data.append(common_info)
-                cost_data.append({
-                    **common_info,
-                    'avg_comm_bytes': result.get('avg_comm_bytes', 0),
-                    'avg_agg_time': result.get('avg_agg_time', 0),
-                    'avg_round_time': result.get('avg_round_time', 0),
-                    'avg_memory': result.get('avg_memory', 0)
-                })
 
         df_perf = pd.DataFrame(perf_data)
-        df_cost = pd.DataFrame(cost_data)
         
         defenses = sorted(df_perf['defense'].unique())
         colors = plt.colormaps.get('tab10').colors
@@ -158,13 +226,13 @@ class ResultAnalyzer:
             for i, defense in enumerate(defenses)
         }
         
-        # Gerar os plots
         self._plot_accuracy_vs_attack(df_perf, defense_styles)
         self._plot_performance_heatmap(df_perf)
         self._plot_selection_impact(df_perf, defense_styles)
         self._plot_temporal_evolution(defense_styles)
         self._plot_cost_metrics(defense_styles)
         print("✅ Gráficos criados com sucesso.")
+
 
     def _plot_accuracy_vs_attack(self, df, defense_styles):
         """
@@ -521,8 +589,8 @@ class ExperimentRunner:
             return
 
         analyzer = ResultAnalyzer(self.base_dir)
-        analyzer.load_results()
-        self.existing_exp_names = set(analyzer.all_results.keys())
+        if analyzer.load_results():
+            self.existing_exp_names = set(analyzer.all_results.keys())
         print(f"✅ Encontrados {len(self.existing_exp_names)} resultados existentes.")
 
     def generate_all_configs(self):
@@ -642,6 +710,13 @@ class ExperimentRunner:
                 try:
                     simulator = FLSimulator(str(config_path), use_threads=False)
                     simulator.run_simulation()
+
+                    output_exp_dir = self.results_dir / name
+                    malicious_file_path = output_exp_dir / 'malicious_clients.json'
+                    with open(malicious_file_path, 'w') as f:
+                        json.dump({'malicious_clients': simulator.malicious_indices}, f, indent=2)
+                    print(f"💾 Índices de clientes maliciosos salvos em {malicious_file_path}")
+
                     print(f"✅ Sucesso: {name}")
                 except Exception as e:
                     print(f"❌ ERRO em {name}: {e}")

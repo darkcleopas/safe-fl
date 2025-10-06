@@ -43,7 +43,7 @@ class FLServer:
             self.base_dir = base_dir
         else:
             self.run_log = datetime.datetime.now().strftime("%Y%m%d-%H%M%S")
-            self.folder_name = f"{self.experiment_config['name']}" + f"_{self.run_log}"
+            self.folder_name = f"{self.experiment_config['name']}"
             self.base_dir = os.path.join(
                 self.experiment_config.get('output_dir', './results'),
                 self.folder_name
@@ -91,6 +91,8 @@ class FLServer:
             'accuracy': [],
             'loss': [],
             'selected_clients': [],
+            'aggregated_clients': [],
+            'model_updated': [], 
             'num_examples': [],
             'local_losses': {},
             'local_accuracies': {},
@@ -113,6 +115,8 @@ class FLServer:
         self.total_rounds = self.experiment_config['rounds']
         self.round_updates = {}  # Armazena atualizações por round
         self.selected_clients = []  # Clientes selecionados para o round atual
+        self.aggregated_clients_this_round = []
+        self.was_model_updated_this_round = False 
         self.training_complete = False # Indica se o treinamento foi concluído
         self.round_start_time = None
         self.client_start_times = {}
@@ -254,6 +258,9 @@ class FLServer:
         Args:
             updates: Lista de tuplas (pesos_modelo, num_exemplos)
         """
+        # Resetar estado da rodada
+        self.aggregated_clients_this_round = []
+        self.was_model_updated_this_round = False
 
         # Medir memória antes da agregação
         process = psutil.Process(os.getpid())
@@ -266,15 +273,17 @@ class FLServer:
         
         # 1. Aplicar filtros de cliente
         filtered_updates = updates
+        filtered_client_ids = client_ids
         context = {
             'round': self.current_round,
             'previous_global_weights': self.previous_global_weights
         }
         for client_filter in self.client_filters:
             if not filtered_updates: break
-            filtered_updates = client_filter.filter(filtered_updates, client_ids, context)
+            filtered_updates, filtered_client_ids = client_filter.filter(filtered_updates, filtered_client_ids, context)
         
         self.logger.info(f"{len(filtered_updates)} de {len(updates)} clientes passaram nos filtros.")
+        self.aggregated_clients_this_round = filtered_client_ids
 
         if not filtered_updates:
             self.logger.warning("Nenhum cliente passou pelos filtros, pulando atualização do modelo global.")
@@ -298,6 +307,8 @@ class FLServer:
             old_weights = self.model.get_weights() 
             should_update = self.global_model_filter.should_update(new_aggregated_weights, old_weights, context)
         
+        self.was_model_updated_this_round = should_update
+
         if should_update:
             self.model.set_weights(new_aggregated_weights)
             # Armazena os novos pesos para a próxima rodada
@@ -535,6 +546,8 @@ class FLServer:
                 self.metrics['accuracy'].append(metrics['accuracy'])
                 self.metrics['loss'].append(metrics['loss'])
                 self.metrics['selected_clients'].append(self.selected_clients)
+                self.metrics['aggregated_clients'].append(self.aggregated_clients_this_round)
+                self.metrics['model_updated'].append(self.was_model_updated_this_round)
                 self.metrics['num_examples'].append(sum(self.round_updates[client_id][1] for client_id in self.selected_clients))
 
                 # Salvar métricas atualizadas
