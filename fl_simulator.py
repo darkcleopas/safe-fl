@@ -42,7 +42,7 @@ class FLSimulator:
         
         # Configura diretório de saída
         self.run_log = datetime.datetime.now().strftime("%Y%m%d-%H%M%S")
-        self.folder_name = f"{self.experiment_config['name']}" + f"_{self.run_log}"
+        self.folder_name = f"{self.experiment_config['name']}"
         self.base_dir = os.path.join(
             self.experiment_config.get('output_dir', './results'),
             self.folder_name

@@ -9,7 +9,7 @@ from typing import List, Dict, Any, Tuple
 import base64
 import io
 import gc
-import inspect
+from sklearn.metrics import precision_score, recall_score, f1_score
 import time
 import psutil
 
@@ -90,6 +90,9 @@ class FLServer:
             'rounds': [],
             'accuracy': [],
             'loss': [],
+            'precision': [],
+            'recall': [],
+            'f1': [],
             'selected_clients': [],
             'aggregated_clients': [],
             'model_updated': [], 
@@ -338,10 +341,22 @@ class FLServer:
         Returns:
             Dicionário com métricas de avaliação
         """
-        results = self.model.evaluate(self.x_test, self.y_test, verbose=0)
+        loss, accuracy = self.model.evaluate(self.x_test, self.y_test, verbose=0)
+
+        y_pred_proba = self.model.predict(self.x_test, verbose=0)
+        y_pred = np.argmax(y_pred_proba, axis=1)
+        y_true = np.argmax(self.y_test, axis=1)
+
+        precision = precision_score(y_true, y_pred, average='weighted', zero_division=0)
+        recall = recall_score(y_true, y_pred, average='weighted', zero_division=0)
+        f1 = f1_score(y_true, y_pred, average='weighted', zero_division=0)
+
         metrics = {
-            'loss': float(results[0]),
-            'accuracy': float(results[1])
+            'loss': float(loss),
+            'accuracy': float(accuracy),
+            'precision': float(precision),
+            'recall': float(recall),
+            'f1': float(f1)
         }
         
         self.logger.info(f"Avaliação do modelo global: {metrics}")
@@ -545,6 +560,9 @@ class FLServer:
                 self.metrics['rounds'].append(self.current_round)
                 self.metrics['accuracy'].append(metrics['accuracy'])
                 self.metrics['loss'].append(metrics['loss'])
+                self.metrics['precision'].append(metrics['precision'])
+                self.metrics['recall'].append(metrics['recall'])
+                self.metrics['f1'].append(metrics['f1'])
                 self.metrics['selected_clients'].append(self.selected_clients)
                 self.metrics['aggregated_clients'].append(self.aggregated_clients_this_round)
                 self.metrics['model_updated'].append(self.was_model_updated_this_round)

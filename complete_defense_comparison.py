@@ -19,6 +19,8 @@ from datetime import datetime
 import numpy as np
 import argparse
 import re
+import ast
+
 
 # Adicionar diretório raiz ao path, se necessário
 # (Assumindo que fl_simulator está no mesmo diretório ou no PYTHONPATH)
@@ -114,6 +116,9 @@ class ResultAnalyzer:
                                 'metrics': metrics,
                                 'final_accuracy': metrics.get('accuracy', [0.0])[-1],
                                 'final_loss': metrics.get('loss', [float('inf')])[-1],
+                                'final_precision': metrics.get('precision', [0.0])[-1],
+                                'final_recall': metrics.get('recall', [0.0])[-1],
+                                'final_f1': metrics.get('f1', [0.0])[-1],
                                 'success': True,
                             }
                         except Exception as e:
@@ -131,6 +136,7 @@ class ResultAnalyzer:
             # NOVO: Instancia o processador para gerar DataFrame e gráficos
             processor = ResultProcessor(self.all_results, self.plots_dir, self.results_dir)
             processor.generate_and_save_dataframe()
+            processor.generate_final_metrics_summary()
             processor.create_all_plots()
         else:
             print("Análise interrompida.")
@@ -178,6 +184,9 @@ class ResultProcessor:
                     "round": metrics.get("rounds")[i],
                     "accuracy": metrics.get("accuracy")[i],
                     "loss": metrics.get("loss")[i],
+                    "precision": metrics.get("precision", default_list)[i],
+                    "recall": metrics.get("recall", default_list)[i],
+                    "f1_score": metrics.get("f1", default_list)[i],
                     "aggregation_time": metrics.get("aggregation_time", default_list)[i],
                     "round_time": metrics.get("round_time", default_list)[i],
                     "communication_bytes": metrics.get("communication_bytes", default_list)[i],
@@ -186,6 +195,9 @@ class ResultProcessor:
                     "model_updated": metrics.get("model_updated", default_bool_list)[i],
                     "final_accuracy": exp_details.get("final_accuracy"),
                     "final_loss": exp_details.get("final_loss"),
+                    "final_precision": exp_details.get("final_precision"),
+                    "final_recall": exp_details.get("final_recall"),
+                    "final_f1_score": exp_details.get("final_f1"),
                     "success": exp_details.get("success"),
                 }
                 all_experiments_data.append(round_data)
@@ -194,6 +206,169 @@ class ResultProcessor:
         df_path = self.results_dir / 'results_summary.csv'
         df.to_csv(df_path, index=False)
         print(f"\n✅ DataFrame com {len(df)} linhas salvo em: {df_path}")
+
+    def _calculate_filter_metrics(self, df_experiment):
+        """
+        Calcula as métricas de classificação para a tarefa de filtragem de clientes.
+        - Verdadeiro Positivo (TP): Cliente malicioso foi REJEITADO.
+        - Verdadeiro Negativo (TN): Cliente honesto foi ACEITO.
+        - Falso Positivo (FP): Cliente honesto foi REJEITADO.
+        - Falso Negativo (FN): Cliente malicioso foi ACEITO.
+        """
+        # Converte a string de clientes maliciosos (que é a mesma para todo o experimento) em um conjunto para busca rápida.
+        try:
+            malicious_clients_set = set(ast.literal_eval(df_experiment['malicious_clients'].iloc[0]))
+        except (ValueError, SyntaxError):
+            malicious_clients_set = set() # Lida com casos onde não há clientes maliciosos
+
+        tp, tn, fp, fn = 0, 0, 0, 0
+
+        for _, row in df_experiment.iterrows():
+            selected_clients = set(ast.literal_eval(row['selected_clients']))
+            aggregated_clients = set(ast.literal_eval(row['aggregated_clients']))
+
+            # Itera sobre todos os clientes que participaram da seleção no round
+            for client_id in selected_clients:
+                is_malicious = client_id in malicious_clients_set
+                was_aggregated = client_id in aggregated_clients
+
+                if is_malicious and not was_aggregated:
+                    tp += 1
+                elif not is_malicious and was_aggregated:
+                    tn += 1
+                elif not is_malicious and not was_aggregated:
+                    fp += 1
+                elif is_malicious and was_aggregated:
+                    fn += 1
+        
+        # Cálculo das métricas de classificação
+        accuracy = (tp + tn) / (tp + tn + fp + fn) if (tp + tn + fp + fn) > 0 else 0
+        precision = tp / (tp + fp) if (tp + fp) > 0 else 0
+        recall = tp / (tp + fn) if (tp + fn) > 0 else 0
+        f1_score = 2 * (precision * recall) / (precision + recall) if (precision + recall) > 0 else 0
+
+        return {
+            'filter_accuracy': accuracy,
+            'filter_precision': precision,
+            'filter_recall': recall,
+            'filter_f1_score': f1_score,
+        }
+
+    def _calculate_update_decision_metrics(self, df_experiment):
+        """
+        Avalia a decisão do servidor de atualizar ou não o modelo.
+        - Cenário Ideal: Atualizar (True) se NENHUM malicioso foi agregado; Não atualizar (False) se ALGUM malicioso foi agregado.
+        - TP: Decisão correta de NÃO atualizar (havia maliciosos agregados).
+        - TN: Decisão correta de ATUALIZAR (não havia maliciosos agregados).
+        - FP: Decisão errada de NÃO atualizar (não havia maliciosos agregados).
+        - FN: Decisão errada de ATUALIZAR (havia maliciosos agregados).
+        """
+        try:
+            malicious_clients_set = set(ast.literal_eval(df_experiment['malicious_clients'].iloc[0]))
+        except (ValueError, SyntaxError):
+            malicious_clients_set = set()
+
+        tp, tn, fp, fn = 0, 0, 0, 0
+        
+        for _, row in df_experiment.iterrows():
+            try:
+                aggregated_clients = set(ast.literal_eval(row['aggregated_clients']))
+            except (ValueError, SyntaxError):
+                continue
+
+            malicious_in_aggregation = not malicious_clients_set.isdisjoint(aggregated_clients)
+            model_was_updated = row['model_updated']
+
+            if malicious_in_aggregation and not model_was_updated:
+                tp += 1
+            elif not malicious_in_aggregation and model_was_updated:
+                tn += 1
+            elif not malicious_in_aggregation and not model_was_updated:
+                fp += 1
+            elif malicious_in_aggregation and model_was_updated:
+                fn += 1
+
+        accuracy = (tp + tn) / (tp + tn + fp + fn) if (tp + tn + fp + fn) > 0 else 0
+        
+        return {
+            'update_decision_accuracy': accuracy,
+            'update_decision_true_positives': tp,
+            'update_decision_true_negatives': tn,
+            'update_decision_false_positives': fp,
+            'update_decision_false_negatives': fn,
+        }
+
+    def generate_final_metrics_summary(self):
+        """
+        Lê o CSV de resumo detalhado, agrega os dados por experimento e salva
+        um novo CSV com as métricas finais, ideal para tabelas de dissertação.
+        """
+        detailed_csv_path = self.results_dir / 'results_summary.csv'
+        if not detailed_csv_path.exists():
+            print(f"⚠️  Arquivo {detailed_csv_path} não encontrado. Pulando a geração do sumário final.")
+            return
+
+        print("\n📄 Gerando CSV com métricas finais agregadas...")
+        df = pd.read_csv(detailed_csv_path)
+        
+        # Agrupa o dataframe por cada experimento único
+        grouped_experiments = df.groupby('experiment_id')
+        
+        final_results = []
+
+        for exp_id, df_exp in grouped_experiments:
+            final_row = df_exp.iloc[-1] # Pega a última linha para métricas finais do modelo
+
+            # 1. Métricas do Filtro de Clientes
+            filter_metrics = self._calculate_filter_metrics(df_exp)
+
+            # 2. Métricas da Decisão de Atualização do Modelo
+            update_decision_metrics = self._calculate_update_decision_metrics(df_exp)
+            
+            # 3. Métricas de Custo e Tempo
+            # Usar .dropna() para evitar erros se houver NaNs
+            median_agg_time = df_exp['aggregation_time'].dropna().median()
+            std_agg_time = df_exp['aggregation_time'].dropna().std()
+            total_time = df_exp['round_time'].sum()
+            
+            # Monta o dicionário com todos os resultados finais para este experimento
+            exp_summary = {
+                'experiment_id': exp_id,
+                'defense': final_row['defense'],
+                'attack_rate': final_row['attack_rate'],
+                'selection_fraction': final_row['selection_fraction'],
+
+                # Métricas finais do modelo global
+                'final_global_accuracy': final_row['final_accuracy'],
+                'final_global_loss': final_row['final_loss'],
+                'final_global_precision': final_row['final_precision'],
+                'final_global_recall': final_row['final_recall'],
+                'final_global_f1_score': final_row['final_f1_score'],
+                
+                # Métricas do filtro de clientes
+                'filter_accuracy': filter_metrics['filter_accuracy'],
+                'filter_precision': filter_metrics['filter_precision'],
+                'filter_recall': filter_metrics['filter_recall'],
+                'filter_f1_score': filter_metrics['filter_f1_score'],
+
+                # Métricas da decisão de atualização
+                'update_decision_accuracy': update_decision_metrics['update_decision_accuracy'],
+                'update_decision_FN_count': update_decision_metrics['update_decision_false_negatives'], # O mais crítico!
+
+                # Métricas de custo
+                'median_aggregation_time_s': median_agg_time,
+                'std_aggregation_time_s': std_agg_time,
+                'total_experiment_time_s': total_time,
+                'total_communication_mb': df_exp['communication_bytes'].sum() / (1024*1024),
+            }
+            final_results.append(exp_summary)
+
+        # Cria o DataFrame final e salva em um novo arquivo CSV
+        df_final_summary = pd.DataFrame(final_results)
+        output_path = self.results_dir / 'final_metrics_summary.csv'
+        df_final_summary.to_csv(output_path, index=False, float_format='%.4f')
+        
+        print(f"✅ Tabela de métricas finais salva com sucesso em: {output_path}")
 
     def create_all_plots(self):
         """
@@ -232,7 +407,6 @@ class ResultProcessor:
         self._plot_temporal_evolution(defense_styles)
         self._plot_cost_metrics(defense_styles)
         print("✅ Gráficos criados com sucesso.")
-
 
     def _plot_accuracy_vs_attack(self, df, defense_styles):
         """
@@ -494,60 +668,68 @@ class ExperimentRunner:
             # --- GRUPO 1: Baselines (Sem Filtros de Cliente) ---
             # Objetivo: Medir a performance base e o efeito de agregadores robustos.
 
-            'Média Ponderada (Baseline)': {
-                'client_filters': [],
-                'aggregation_strategy': {'name': 'FED_AVG', 'params': {}},
-                'global_model_filter': None
-            },
-            'Média Aparada': {
-                'client_filters': [],
-                'aggregation_strategy': {'name': 'TRIMMED_MEAN', 'params': {'trim_ratio': 0.4}},
-                'global_model_filter': None
-            },
+            # 'Média Ponderada (Baseline)': {
+            #     'client_filters': [],
+            #     'aggregation_strategy': {'name': 'FED_AVG', 'params': {}},
+            #     'global_model_filter': None
+            # },
+            # 'Média Aparada': {
+            #     'client_filters': [],
+            #     'aggregation_strategy': {'name': 'TRIMMED_MEAN', 'params': {'trim_ratio': 0.4}},
+            #     'global_model_filter': None
+            # },
 
             # --- GRUPO 2: Filtros de Cliente + Agregação Padrão ---
             # Objetivo: Isolar e medir a eficácia de cada filtro de cliente.
 
-            'Filtro Krum + Média Ponderada': {
-                'client_filters': [{'name': 'KRUM', 'params': {}}],
-                'aggregation_strategy': {'name': 'FED_AVG'},
-                'global_model_filter': None
-            },
-            'Filtro Multi-Krum + Média Ponderada': {
-                'client_filters': [{'name': 'MULTI_KRUM', 'params': {}}],
-                'aggregation_strategy': {'name': 'FED_AVG'},
-                'global_model_filter': None
-            },
-            'Filtro Clustering + Média Ponderada': {
-                'client_filters': [{'name': 'CLUSTERING', 'params': {}}],
-                'aggregation_strategy': {'name': 'FED_AVG'},
-                'global_model_filter': None
-            },
-            'Filtro L2 Direcional + Média Ponderada': {
-                'client_filters': [{
-                    'name': 'L2_DIRECTIONAL_FILTER',
-                    'params': {'window_size': 3, 'std_dev_multiplier': 1.5, 'min_rounds_history': 3}
-                }],
-                'aggregation_strategy': {'name': 'FED_AVG'},
-                'global_model_filter': None
-            },
+            # 'Filtro Krum + Média Ponderada': {
+            #     'client_filters': [{'name': 'KRUM', 'params': {}}],
+            #     'aggregation_strategy': {'name': 'FED_AVG'},
+            #     'global_model_filter': None
+            # },
+            # 'Filtro Multi-Krum + Média Ponderada': {
+            #     'client_filters': [{'name': 'MULTI_KRUM', 'params': {}}],
+            #     'aggregation_strategy': {'name': 'FED_AVG'},
+            #     'global_model_filter': None
+            # },
+            # 'Filtro Clustering + Média Ponderada': {
+            #     'client_filters': [{'name': 'CLUSTERING', 'params': {}}],
+            #     'aggregation_strategy': {'name': 'FED_AVG'},
+            #     'global_model_filter': None
+            # },
+            # 'Filtro L2 Direcional + Média Ponderada': {
+            #     'client_filters': [{
+            #         'name': 'L2_DIRECTIONAL_FILTER',
+            #         'params': {'window_size': 3, 'std_dev_multiplier': 1.5, 'min_rounds_history': 3}
+            #     }],
+            #     'aggregation_strategy': {'name': 'FED_AVG'},
+            #     'global_model_filter': None
+            # },
 
             # --- GRUPO 3: Pipelines de Defesa em Múltiplas Camadas ---
             # Objetivo: Testar o efeito combinado de diferentes tipos de filtros e agregadores.
 
-            'Média Ponderada + Filtro L2 Global': {
-                'client_filters': [],
-                'aggregation_strategy': {'name': 'FED_AVG'},
-                'global_model_filter': {
-                    'name': 'L2_GLOBAL_MODEL_FILTER',
-                    'params': {'window_size': 3, 'std_dev_multiplier': 1.5, 'min_rounds_history': 3}
-                }
-            },
-            'Filtro L2 Direcional + Média Ponderada + Filtro L2 Global': {
-                'client_filters': [{
-                    'name': 'L2_DIRECTIONAL_FILTER',
-                    'params': {'window_size': 3, 'std_dev_multiplier': 1.5, 'min_rounds_history': 3}
-                }],
+            # 'Média Ponderada + Filtro L2 Global': {
+            #     'client_filters': [],
+            #     'aggregation_strategy': {'name': 'FED_AVG'},
+            #     'global_model_filter': {
+            #         'name': 'L2_GLOBAL_MODEL_FILTER',
+            #         'params': {'window_size': 3, 'std_dev_multiplier': 1.5, 'min_rounds_history': 3}
+            #     }
+            # },
+            # 'Filtro L2 Direcional + Média Ponderada + Filtro L2 Global': {
+            #     'client_filters': [{
+            #         'name': 'L2_DIRECTIONAL_FILTER',
+            #         'params': {'window_size': 3, 'std_dev_multiplier': 1.5, 'min_rounds_history': 3}
+            #     }],
+            #     'aggregation_strategy': {'name': 'FED_AVG'},
+            #     'global_model_filter': {
+            #         'name': 'L2_GLOBAL_MODEL_FILTER',
+            #         'params': {'window_size': 3, 'std_dev_multiplier': 1.5, 'min_rounds_history': 3}
+            #     }
+            # },
+            'Filtro Clustering + Média Ponderada + Filtro L2 Global': {
+                'client_filters': [{'name': 'CLUSTERING', 'params': {}}],
                 'aggregation_strategy': {'name': 'FED_AVG'},
                 'global_model_filter': {
                     'name': 'L2_GLOBAL_MODEL_FILTER',
@@ -557,8 +739,13 @@ class ExperimentRunner:
         }
         self.attack_rates = [0.0, 0.2, 0.4, 0.6, 0.8]
         self.selection_fractions = [0.4, 1.0]
+        self.non_iid = [True, False]
+
+        self.selection_strategy = 'random'
+        self.model_name = 'CNN_SIGN'
+        self.dataset_name = 'SIGN'
         self.rounds = 30
-        self.num_clients = 15
+        self.num_clients = 10
         self.local_epochs = 2
         self.batch_size = 16
         self.seed = 42
@@ -570,7 +757,7 @@ class ExperimentRunner:
             self.base_dir = Path(resume_dir)
             print(f"🔄 Retomando simulação no diretório: {self.base_dir}")
         else:
-            self.base_dir = Path(f'simulation_{datetime.now().strftime("%Y%m%d_%H%M%S")}')
+            self.base_dir = Path(f'simulations/simulation_{datetime.now().strftime("%Y%m%d_%H%M%S")}')
             print(f"🆕 Iniciando nova simulação em: {self.base_dir}")
         
         self.config_dir = self.base_dir / 'config'
@@ -599,42 +786,44 @@ class ExperimentRunner:
         for defense_name, defense_pipeline in self.defense_pipelines.items():
             for attack_rate in self.attack_rates:
                 for sel_frac in self.selection_fractions:
-                    attack_part = f"lf_{int(attack_rate*100)}" if attack_rate > 0 else "no_attack"
-                    defense_part = slugify(defense_name)
-                    sel_part = f"sel_{int(sel_frac*100)}"
-                    exp_name = f"{attack_part}_{defense_part}_{sel_part}"
+                    for non_iid in self.non_iid:
+                        attack_part = f"lf_{int(attack_rate*100)}" if attack_rate > 0 else "no_attack"
+                        defense_part = slugify(defense_name)
+                        sel_part = f"sel_{int(sel_frac*100)}"
+                        non_iid_part = 'non_iid' if non_iid else 'iid'
+                        exp_name = f"{attack_part}_{defense_part}_{sel_part}_{non_iid_part}"
 
-                    config = {
-                        'experiment': {
-                            'name': exp_name,
-                            'defense_name': defense_name,
-                            'description': f"{defense_name} vs {int(attack_rate*100)}% label flipping (sel: {int(sel_frac*100)}%)",
-                            'seed': self.seed,
-                            'rounds': self.rounds,
-                            'output_dir': str(self.results_dir),
-                            'log_level': 'info',
-                            'save_client_models': self.save_client_models,
-                            'save_server_intermediate_models': self.save_server_intermediate_models
-                        },
-                        'dataset': {'name': 'SIGN', 'non_iid': False},
-                        'model': {'type': 'CNN_SIGN', 'local_epochs': self.local_epochs, 'batch_size': self.batch_size},
-                        'server': {
-                            'type': 'standard',
-                            'address': '0.0.0.0:8000',
-                            'defense_pipeline': defense_pipeline,
-                            'selection_strategy': 'random',
-                            'selection_fraction': sel_frac,
-                            'evaluation_interval': 1,
-                            'max_concurrent_clients': 3
-                        },
-                        'clients': {
-                            'num_clients': self.num_clients,
-                            'honest_client_type': 'standard',
-                            'malicious_client_type': 'label_flipping' if attack_rate > 0 else None,
-                            'malicious_percentage': attack_rate
+                        config = {
+                            'experiment': {
+                                'name': exp_name,
+                                'defense_name': defense_name,
+                                'description': f"{defense_name} vs {int(attack_rate*100)}% label flipping (sel: {int(sel_frac*100)}%)",
+                                'seed': self.seed,
+                                'rounds': self.rounds,
+                                'output_dir': str(self.results_dir),
+                                'log_level': 'info',
+                                'save_client_models': self.save_client_models,
+                                'save_server_intermediate_models': self.save_server_intermediate_models
+                            },
+                            'dataset': {'name': self.dataset_name, 'non_iid': non_iid},
+                            'model': {'type': self.model_name, 'local_epochs': self.local_epochs, 'batch_size': self.batch_size},
+                            'server': {
+                                'type': 'standard',
+                                'address': '0.0.0.0:8000',
+                                'defense_pipeline': defense_pipeline,
+                                'selection_strategy': self.selection_strategy,
+                                'selection_fraction': sel_frac,
+                                'evaluation_interval': 1,
+                                'max_concurrent_clients': 3
+                            },
+                            'clients': {
+                                'num_clients': self.num_clients,
+                                'honest_client_type': 'standard',
+                                'malicious_client_type': 'label_flipping' if attack_rate > 0 else None,
+                                'malicious_percentage': attack_rate
+                            }
                         }
-                    }
-                    planned_configs[exp_name] = config
+                        planned_configs[exp_name] = config
         return planned_configs
 
     def estimate_time(self, configs):
@@ -643,7 +832,7 @@ class ExperimentRunner:
         if num_pending_experiments == 0:
             return 0
 
-        base_time_per_client_per_round = 7  # segundos (estimativa conservadora)
+        base_time_per_client_per_round = 6  # segundos (estimativa conservadora)
 
         avg_selection_fraction = np.mean(self.selection_fractions) if self.selection_fractions else 0
         avg_clients_per_round = self.num_clients * avg_selection_fraction
