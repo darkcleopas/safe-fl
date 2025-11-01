@@ -116,6 +116,16 @@ class FLSimulator:
         # Determine which clients are malicious
         self.malicious_indices = sorted(random.sample(range(1, num_clients + 1), num_malicious))
         self.logger.info(f"Malicious clients: {self.malicious_indices}")
+
+        # Persist malicious client indices for downstream analysis
+        try:
+            import json
+            path = os.path.join(self.base_dir, 'malicious_clients.json')
+            with open(path, 'w') as f:
+                json.dump({'malicious_clients': self.malicious_indices}, f, indent=2)
+            self.logger.info(f"Malicious clients saved to {path}")
+        except Exception as e:
+            self.logger.warning(f"Failed to save malicious clients file: {e}")
         
         self.logger.info(f"Initializing {num_clients} clients ({num_malicious} malicious)")
         
@@ -190,7 +200,7 @@ class FLSimulator:
             def train_client_thread(client_id):
                 client = self.clients[client_id]
                 weights, num_examples, loss, accuracy = self._train_client(client, global_weights)
-                
+
                 # Thread-safe update of results
                 with lock:
                     thread_results[client_id] = (weights, num_examples, loss, accuracy)
@@ -205,8 +215,32 @@ class FLSimulator:
             for thread in threads:
                 thread.join()
             
-            # Collect results from threads
-            client_updates = thread_results
+            # Collect results from threads and register in server
+            for client_id, (weights, num_examples, local_loss, local_accuracy) in thread_results.items():
+                # Store update for aggregation
+                self.server.round_updates[client_id] = (weights, num_examples)
+
+                # Save client model if enabled
+                if self.save_client_models:
+                    try:
+                        client = self.clients[client_id]
+                        client_model_dir = os.path.join(self.client_models_dir, f'client_{client_id}')
+                        os.makedirs(client_model_dir, exist_ok=True)
+                        model_path = os.path.join(client_model_dir, f'model_round_{self.server.current_round}.h5')
+                        client.model.save(model_path)
+                        self.logger.info(f"Modelo do cliente {client_id} (rodada {self.server.current_round}) salvo em {model_path}")
+                        gc.collect()
+                    except Exception as e:
+                        self.logger.error(f"Erro ao salvar modelo do cliente {client_id}: {str(e)}")
+
+                # Store local metrics
+                if client_id not in self.server.metrics['local_losses']:
+                    self.server.metrics['local_losses'][client_id] = []
+                    self.server.metrics['local_accuracies'][client_id] = []
+                    self.server.metrics['client_examples'][client_id] = []
+                self.server.metrics['local_losses'][client_id].append(local_loss)
+                self.server.metrics['local_accuracies'][client_id].append(local_accuracy)
+                self.server.metrics['client_examples'][client_id].append(num_examples)
             
         else:
             # Sequential training

@@ -8,6 +8,7 @@ Este script foi refatorado para separar a execução da análise.
 
 import os
 import sys
+import subprocess
 import yaml
 import json
 import time
@@ -40,6 +41,13 @@ def slugify(text):
     text = re.sub(r'\s+', '_', text)  # Substitui espaços por underscores
     text = re.sub(r'[^\w\-]+', '', text) # Remove caracteres não alfanuméricos
     return text
+
+
+def ensure_list(x):
+    """Garantir que o valor seja uma lista (para varrer variações)."""
+    if x is None:
+        return [None]
+    return x if isinstance(x, list) else [x]
 
 
 class ResultAnalyzer:
@@ -112,6 +120,19 @@ class ResultAnalyzer:
                                 'defense': defense_name,
                                 'attack_rate': attack_rate,
                                 'selection_fraction': sel_frac,
+                                'selection_strategy': config.get('server', {}).get('selection_strategy'),
+                                'dataset_name': config.get('dataset', {}).get('name'),
+                                'non_iid': config.get('dataset', {}).get('non_iid'),
+                                'dirichlet_alpha': config.get('dataset', {}).get('dirichlet_alpha'),
+                                'model_type': config.get('model', {}).get('type'),
+                                'local_epochs': config.get('model', {}).get('local_epochs'),
+                                'batch_size': config.get('model', {}).get('batch_size'),
+                                'learning_rate': config.get('model', {}).get('learning_rate'),
+                                'rounds_total': config.get('experiment', {}).get('rounds'),
+                                'num_clients': config.get('clients', {}).get('num_clients'),
+                                'seed': config.get('experiment', {}).get('seed'),
+                                'reuse_client_model': config.get('experiment', {}).get('reuse_client_model', False),
+                                'keras_verbose': config.get('experiment', {}).get('keras_verbose', 0),
                                 'malicious_clients': malicious_clients,
                                 'metrics': metrics,
                                 'final_accuracy': metrics.get('accuracy', [0.0])[-1],
@@ -180,6 +201,19 @@ class ResultProcessor:
                     "defense": exp_details.get("defense"),
                     "attack_rate": exp_details.get("attack_rate"),
                     "selection_fraction": exp_details.get("selection_fraction"),
+                    "selection_strategy": exp_details.get("selection_strategy"),
+                    "dataset_name": exp_details.get("dataset_name"),
+                    "non_iid": exp_details.get("non_iid"),
+                    "dirichlet_alpha": exp_details.get("dirichlet_alpha"),
+                    "model_type": exp_details.get("model_type"),
+                    "local_epochs": exp_details.get("local_epochs"),
+                    "batch_size": exp_details.get("batch_size"),
+                    "learning_rate": exp_details.get("learning_rate"),
+                    "rounds_total": exp_details.get("rounds_total"),
+                    "num_clients": exp_details.get("num_clients"),
+                    "seed": exp_details.get("seed"),
+                    "reuse_client_model": exp_details.get("reuse_client_model"),
+                    "keras_verbose": exp_details.get("keras_verbose"),
                     "malicious_clients": malicious_clients_str,
                     "round": metrics.get("rounds")[i],
                     "accuracy": metrics.get("accuracy")[i],
@@ -337,6 +371,17 @@ class ResultProcessor:
                 'defense': final_row['defense'],
                 'attack_rate': final_row['attack_rate'],
                 'selection_fraction': final_row['selection_fraction'],
+                'selection_strategy': final_row.get('selection_strategy'),
+                'dataset_name': final_row.get('dataset_name'),
+                'non_iid': final_row.get('non_iid'),
+                'dirichlet_alpha': final_row.get('dirichlet_alpha'),
+                'model_type': final_row.get('model_type'),
+                'local_epochs': final_row.get('local_epochs'),
+                'batch_size': final_row.get('batch_size'),
+                'learning_rate': final_row.get('learning_rate'),
+                'rounds_total': final_row.get('rounds_total'),
+                'num_clients': final_row.get('num_clients'),
+                'seed': final_row.get('seed'),
 
                 # Métricas finais do modelo global
                 'final_global_accuracy': final_row['final_accuracy'],
@@ -645,7 +690,11 @@ class ResultProcessor:
         """Executa o pipeline completo de análise: carregar dados e criar plots."""
         # O método retorna True se resultados foram carregados, False caso contrário.
         if self.load_results():
-            self.create_all_plots()
+            # Gerar CSV detalhado e resumo final antes dos gráficos
+            processor = ResultProcessor(self.all_results, self.plots_dir, self.results_dir)
+            processor.generate_and_save_dataframe()
+            processor.generate_final_metrics_summary()
+            processor.create_all_plots()
         else:
             # A mensagem de "Nenhum resultado" já é impressa dentro de load_results.
             print("Análise interrompida.")
@@ -748,6 +797,8 @@ class ExperimentRunner:
         self.num_clients = 10
         self.local_epochs = 2
         self.batch_size = 16
+        self.learning_rate = None  # Pode ser lista no suite
+        self.dirichlet_alpha = None  # Pode ser lista no suite
         self.seed = 42
 
         self.save_client_models = False
@@ -784,46 +835,84 @@ class ExperimentRunner:
         """Gera um dicionário com todas as configurações de experimentos planejados."""
         planned_configs = {}
         for defense_name, defense_pipeline in self.defense_pipelines.items():
-            for attack_rate in self.attack_rates:
-                for sel_frac in self.selection_fractions:
-                    for non_iid in self.non_iid:
-                        attack_part = f"lf_{int(attack_rate*100)}" if attack_rate > 0 else "no_attack"
-                        defense_part = slugify(defense_name)
-                        sel_part = f"sel_{int(sel_frac*100)}"
-                        non_iid_part = 'non_iid' if non_iid else 'iid'
-                        exp_name = f"{attack_part}_{defense_part}_{sel_part}_{non_iid_part}"
+            for selection_strategy in ensure_list(self.selection_strategy):
+                for model_name in ensure_list(self.model_name):
+                    for dataset_name in ensure_list(self.dataset_name):
+                        for rounds in ensure_list(self.rounds):
+                            for num_clients in ensure_list(self.num_clients):
+                                for local_epochs in ensure_list(self.local_epochs):
+                                    for batch_size in ensure_list(self.batch_size):
+                                        lr_list = ensure_list(self.learning_rate) if self.learning_rate is not None else [None]
+                                        for learning_rate in lr_list:
+                                            for seed in ensure_list(self.seed):
+                                                for attack_rate in ensure_list(self.attack_rates):
+                                                    for sel_frac in ensure_list(self.selection_fractions):
+                                                        for non_iid in ensure_list(self.non_iid):
+                                                            alpha_list = ensure_list(self.dirichlet_alpha) if self.dirichlet_alpha is not None else [None]
+                                                            for dir_alpha in alpha_list:
+                                                                # Nome do experimento contendo todas variações relevantes
+                                                                attack_part = f"lf_{int(attack_rate*100)}" if attack_rate and attack_rate > 0 else "no_attack"
+                                                                defense_part = slugify(defense_name)
+                                                                sf_part = f"sf_{int(sel_frac*100)}"
+                                                                strat_part = f"sel_{slugify(str(selection_strategy))}"
+                                                                ds_part = f"ds_{slugify(str(dataset_name))}"
+                                                                model_part = f"m_{slugify(str(model_name))}"
+                                                                rounds_part = f"r_{rounds}"
+                                                                clients_part = f"n_{num_clients}"
+                                                                epochs_part = f"ep_{local_epochs}"
+                                                                bs_part = f"bs_{batch_size}"
+                                                                lr_part = f"lr_{learning_rate}" if learning_rate is not None else "lr_default"
+                                                                seed_part = f"s_{seed}"
+                                                                niid_part = 'non_iid' if non_iid else 'iid'
+                                                                alpha_part = f"alpha_{dir_alpha}" if dir_alpha is not None else None
+                                                                name_parts = [attack_part, defense_part, sf_part, strat_part, ds_part, model_part, rounds_part, clients_part, epochs_part, bs_part, lr_part, seed_part, niid_part]
+                                                                if alpha_part:
+                                                                    name_parts.append(alpha_part)
+                                                                exp_name = "_".join(name_parts)
 
-                        config = {
-                            'experiment': {
-                                'name': exp_name,
-                                'defense_name': defense_name,
-                                'description': f"{defense_name} vs {int(attack_rate*100)}% label flipping (sel: {int(sel_frac*100)}%)",
-                                'seed': self.seed,
-                                'rounds': self.rounds,
-                                'output_dir': str(self.results_dir),
-                                'log_level': 'info',
-                                'save_client_models': self.save_client_models,
-                                'save_server_intermediate_models': self.save_server_intermediate_models
-                            },
-                            'dataset': {'name': self.dataset_name, 'non_iid': non_iid},
-                            'model': {'type': self.model_name, 'local_epochs': self.local_epochs, 'batch_size': self.batch_size},
-                            'server': {
-                                'type': 'standard',
-                                'address': '0.0.0.0:8000',
-                                'defense_pipeline': defense_pipeline,
-                                'selection_strategy': self.selection_strategy,
-                                'selection_fraction': sel_frac,
-                                'evaluation_interval': 1,
-                                'max_concurrent_clients': 3
-                            },
-                            'clients': {
-                                'num_clients': self.num_clients,
-                                'honest_client_type': 'standard',
-                                'malicious_client_type': 'label_flipping' if attack_rate > 0 else None,
-                                'malicious_percentage': attack_rate
-                            }
-                        }
-                        planned_configs[exp_name] = config
+                                                                config = {
+                                                                    'experiment': {
+                                                                        'name': exp_name,
+                                                                        'defense_name': defense_name,
+                                                                        'description': f"{defense_name} vs {int((attack_rate or 0)*100)}% label flipping (sel: {int(sel_frac*100)}%)",
+                                                                        'seed': seed,
+                                                                        'rounds': rounds,
+                                                                        'output_dir': str(self.results_dir),
+                                                                        'log_level': 'info',
+                                                                        'save_client_models': self.save_client_models,
+                                                                        'save_server_intermediate_models': self.save_server_intermediate_models,
+                                                                        'reuse_client_model': getattr(self, 'reuse_client_model', False),
+                                                                        'keras_verbose': int(getattr(self, 'keras_verbose', 0))
+                                                                    },
+                                                                    'dataset': {
+                                                                        'name': dataset_name,
+                                                                        'non_iid': bool(non_iid),
+                                                                        'dirichlet_alpha': float(dir_alpha) if (dir_alpha is not None) else None
+                                                                    },
+                                                                    'model': {
+                                                                        'type': model_name,
+                                                                        'local_epochs': int(local_epochs),
+                                                                        'batch_size': int(batch_size)
+                                                                    },
+                                                                    'server': {
+                                                                        'type': 'standard',
+                                                                        'address': '0.0.0.0:8000',
+                                                                        'defense_pipeline': defense_pipeline,
+                                                                        'selection_strategy': selection_strategy,
+                                                                        'selection_fraction': float(sel_frac),
+                                                                        'evaluation_interval': 1,
+                                                                        'max_concurrent_clients': int(getattr(self, 'max_concurrent_clients', 3))
+                                                                    },
+                                                                    'clients': {
+                                                                        'num_clients': int(num_clients),
+                                                                        'honest_client_type': 'standard',
+                                                                        'malicious_client_type': 'label_flipping' if (attack_rate and attack_rate > 0) else None,
+                                                                        'malicious_percentage': float(attack_rate or 0.0)
+                                                                    }
+                                                                }
+                                                                if learning_rate is not None:
+                                                                    config['model']['learning_rate'] = float(learning_rate)
+                                                                planned_configs[exp_name] = config
         return planned_configs
 
     def estimate_time(self, configs):
@@ -832,7 +921,7 @@ class ExperimentRunner:
         if num_pending_experiments == 0:
             return 0
 
-        base_time_per_client_per_round = 6  # segundos (estimativa conservadora)
+        base_time_per_client_per_round = 6 / self.num_clients  # segundos (estimativa conservadora)
 
         avg_selection_fraction = np.mean(self.selection_fractions) if self.selection_fractions else 0
         avg_clients_per_round = self.num_clients * avg_selection_fraction
@@ -893,6 +982,10 @@ class ExperimentRunner:
                 print(f"\n{'='*60}\n🔬 Executando {i+1}/{len(pending_configs)}: {name}\n{'='*60}")
                 
                 config_path = self.config_dir / f"{name}.yaml"
+                # Injetar flags extras antes de salvar
+                config_data['experiment']['reuse_client_model'] = getattr(self, 'reuse_client_model', False)
+                config_data['experiment']['keras_verbose'] = int(getattr(self, 'keras_verbose', 0))
+                config_data['server']['max_concurrent_clients'] = int(getattr(self, 'max_concurrent_clients', 3))
                 with open(config_path, 'w') as f:
                     yaml.dump(config_data, f, default_flow_style=False, sort_keys=False)
                 
@@ -968,6 +1061,23 @@ def main():
         help='Modo Execução (Retomar): Caminho para uma simulação para continuar a execução.\n'
              'Exemplo: --resume_dir simulation_20250912_011458'
     )
+    parser.add_argument(
+        '--suite',
+        type=str,
+        metavar='PATH',
+        help='Arquivo YAML mestre descrevendo todos os experimentos (variações e defesas).'
+    )
+    parser.add_argument(
+        '--jobs',
+        type=int,
+        default=1,
+        help='Número de processos em paralelo para executar os experimentos (repasse para simulate_fl.py).'
+    )
+    parser.add_argument(
+        '--threads',
+        action='store_true',
+        help='Usar multi-threading dentro de cada simulação (repasse para simulate_fl.py).'
+    )
     args = parser.parse_args()
 
     if args.analyze_dir:
@@ -978,7 +1088,79 @@ def main():
         print("--- MODO DE EXECUÇÃO ATIVADO ---")
         # Se resume_dir for fornecido, ele continua. Se for --run, resume_dir é None e inicia uma nova.
         runner = ExperimentRunner(resume_dir=args.resume_dir)
-        runner.run_workflow()
+
+        # Se um arquivo de suite for fornecido, sobrepõe as opções do runner
+        if args.suite:
+            with open(args.suite, 'r') as f:
+                suite_cfg = yaml.safe_load(f)
+
+            # Atribui com defaults seguros
+            runner.defense_pipelines = suite_cfg.get('defense_pipelines', runner.defense_pipelines)
+            runner.attack_rates = suite_cfg.get('attack_rates', runner.attack_rates)
+            runner.selection_fractions = suite_cfg.get('selection_fractions', runner.selection_fractions)
+            runner.non_iid = suite_cfg.get('non_iid', runner.non_iid)
+            runner.dirichlet_alpha = suite_cfg.get('dirichlet_alpha', getattr(runner, 'dirichlet_alpha', None))
+
+            runner.selection_strategy = suite_cfg.get('selection_strategy', runner.selection_strategy)
+            runner.model_name = suite_cfg.get('model_name', runner.model_name)
+            runner.dataset_name = suite_cfg.get('dataset_name', runner.dataset_name)
+            runner.rounds = suite_cfg.get('rounds', runner.rounds)
+            runner.num_clients = suite_cfg.get('num_clients', runner.num_clients)
+            runner.local_epochs = suite_cfg.get('local_epochs', runner.local_epochs)
+            runner.batch_size = suite_cfg.get('batch_size', runner.batch_size)
+            runner.learning_rate = suite_cfg.get('learning_rate', getattr(runner, 'learning_rate', None))
+            runner.seed = suite_cfg.get('seed', runner.seed)
+
+            runner.save_client_models = suite_cfg.get('save_client_models', runner.save_client_models)
+            runner.save_server_intermediate_models = suite_cfg.get('save_server_intermediate_models', runner.save_server_intermediate_models)
+
+            # Extras passados via experiment
+            runner.reuse_client_model = suite_cfg.get('reuse_client_model', False)
+            runner.keras_verbose = int(suite_cfg.get('keras_verbose', 0))
+            runner.max_concurrent_clients = suite_cfg.get('max_concurrent_clients', 3)
+
+        # Gera configs (pula existentes) e executa tudo em paralelo via simulate_fl.py
+        runner.load_existing_results()
+        planned_configs = runner.generate_all_configs()
+        pending_configs = {
+            name: cfg for name, cfg in planned_configs.items()
+            if name not in runner.existing_exp_names
+        }
+
+        print(f"\n📊 Status da Simulação:")
+        print(f"  - {len(planned_configs)} experimentos planejados.")
+        print(f"  - {len(runner.existing_exp_names)} experimentos já concluídos.")
+        print(f"  - {len(pending_configs)} experimentos pendentes para execução.")
+
+        if pending_configs:
+            runner.estimate_time(pending_configs)
+
+            response = input(f"\n❓ Deseja continuar com a execução dos {len(pending_configs)} experimentos pendentes? (y/N): ").lower().strip()
+            if response == 'y':
+                # Escreve todos os YAMLs pendentes
+                for name, config_data in pending_configs.items():
+                    config_path = runner.config_dir / f"{name}.yaml"
+                    # Injetar flags extras de otimização na seção experiment/server
+                    config_data['experiment']['reuse_client_model'] = getattr(runner, 'reuse_client_model', False)
+                    config_data['experiment']['keras_verbose'] = int(getattr(runner, 'keras_verbose', 0))
+                    config_data['server']['max_concurrent_clients'] = getattr(runner, 'max_concurrent_clients', 3)
+                    with open(config_path, 'w') as f:
+                        yaml.dump(config_data, f, default_flow_style=False, sort_keys=False)
+
+                # Executa via simulate_fl.py com paralelismo em processos
+                simulate_path = Path(__file__).resolve().parent / 'simulate_fl.py'
+                cmd = [sys.executable, str(simulate_path), '--config', str(runner.config_dir)]
+                if args.threads:
+                    cmd.append('--threads')
+                if args.jobs and args.jobs > 1:
+                    cmd.extend(['--jobs', str(args.jobs)])
+                print(f"\n🧪 Executando: {' '.join(cmd)}")
+                subprocess.check_call(cmd)
+            else:
+                print("❌ Execução cancelada pelo usuário.")
+
+        # Seja tendo ou não executado algo, gera/resume sumário e análise
+        runner.save_results_summary()
         
         print("\n--- INICIANDO ANÁLISE DOS RESULTADOS FINAIS ---")
         analyzer = ResultAnalyzer(runner.base_dir)

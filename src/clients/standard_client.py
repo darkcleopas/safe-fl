@@ -37,6 +37,10 @@ class FLClient:
         self.dataset_config = config['dataset']
         self.clients_config = config['clients']
         self.server_config = config['server']
+
+        # Opções de otimização
+        self.reuse_client_model = self.experiment_config.get('reuse_client_model', False)
+        self.keras_verbose = int(self.experiment_config.get('keras_verbose', 0))
         
         # URL do servidor
         if server_url:
@@ -57,14 +61,15 @@ class FLClient:
         
         # Carregar dados
         self.load_data()
-        
-        # O modelo será recebido do servidor
+
+        # O modelo será recebido do servidor (pode ser criado sob demanda)
         self.model = None
-        
+        self._pending_weights = None
+
         # Estado do treinamento
         self.current_round = 0
         self.is_selected = False
-        
+
         self.logger.info(f"Cliente {client_id} inicializado com sucesso")
     
     def setup_logging(self):
@@ -124,8 +129,11 @@ class FLClient:
             dataset_name=self.dataset_config['name'],
             client_id=self.client_id,
             num_clients=self.clients_config['num_clients'],
-            non_iid=self.dataset_config['non_iid'],
-            seed=self.seed
+            non_iid=self.dataset_config.get('non_iid', False),
+            seed=self.seed,
+            dirichlet_alpha=self.dataset_config.get('dirichlet_alpha'),
+            experiment_dir=self.experiment_dir,
+            export_distribution=True,
         )
         
         self.num_examples = len(self.x_train)
@@ -224,11 +232,13 @@ class FLClient:
         self.model = model_factory.create_model(
             model_name=self.model_config['type'],
             input_shape=self.x_train.shape,
-            num_classes=self.num_classes
+            num_classes=self.num_classes,
+            learning_rate=self.model_config.get('learning_rate')
         )
         
         # Definir os pesos
-        self.model.set_weights(weights)
+        if weights is not None:
+            self.model.set_weights(weights)
         self.logger.info("Modelo inicializado com os pesos do servidor")
     
     def update_model_weights(self, weights: List[np.ndarray]):
@@ -238,12 +248,14 @@ class FLClient:
         Args:
             weights: Lista de arrays numpy com os pesos do modelo
         """
-        if self.model is None:
-            self.initialize_model(weights)
-            return
-        
-        self.model.set_weights(weights)
-        self.logger.info("Pesos do modelo atualizados com sucesso")
+        # Armazena pesos pendentes e evita manter muitos modelos residentes
+        self._pending_weights = weights
+        if self.reuse_client_model:
+            if self.model is None:
+                self.initialize_model(weights)
+            else:
+                self.model.set_weights(weights)
+        self.logger.info("Pesos recebidos/atualizados com sucesso")
 
     def check_round(self) -> Tuple[bool, bool]:
         """
@@ -288,18 +300,27 @@ class FLClient:
             self.logger.error(f"Erro ao verificar rodada: {str(e)}")
             return False, False, False, False
     
-    def train_model(self) -> Tuple[List[np.ndarray], int]:
+    def train_model(self) -> Tuple[List[np.ndarray], int, float, float]:
         """
         Treina o modelo local com os dados do cliente.
         
         Returns:
             Tupla contendo os pesos do modelo treinado e o número de exemplos usados
         """
-        if self.model is None:
-            self.logger.error("Modelo não inicializado. É necessário buscar o modelo primeiro.")
-            raise ValueError("Modelo não inicializado")
+        # Criar/garantir modelo conforme política de reutilização
+        if self.model is None or not self.reuse_client_model:
+            # Inicializa (ou reinicializa) o modelo com os pesos pendentes
+            model_factory = ModelFactory()
+            self.model = model_factory.create_model(
+                model_name=self.model_config['type'],
+                input_shape=self.x_train.shape,
+                num_classes=self.num_classes,
+                learning_rate=self.model_config.get('learning_rate')
+            )
+            if self._pending_weights is not None:
+                self.model.set_weights(self._pending_weights)
         
-        # Parâmetros de treinamento
+    # Parâmetros de treinamento
         local_epochs = self.model_config['local_epochs']
         batch_size = self.model_config['batch_size']
         
@@ -309,13 +330,15 @@ class FLClient:
         effective_epochs = local_epochs
         self.logger.info(f"Iniciando treinamento local por {effective_epochs} épocas")
         
+        # Criar pipeline tf.data leve (prefetch para throughput)
+        ds = tf.data.Dataset.from_tensor_slices((self.x_train, self.y_train))
+        ds = ds.batch(batch_size).prefetch(tf.data.AUTOTUNE)
+
         # Treinar o modelo
         history = self.model.fit(
-            self.x_train, 
-            self.y_train,
+            ds,
             epochs=effective_epochs,
-            batch_size=batch_size,
-            verbose=1
+            verbose=self.keras_verbose
         )
         
         # Logs de métricas
@@ -323,13 +346,18 @@ class FLClient:
         final_accuracy = history.history['accuracy'][-1]
         self.logger.info(f"Treinamento concluído. Loss: {final_loss:.4f}, Accuracy: {final_accuracy:.4f}")
         
-        # Guardar os pesos antes de limpar a sessão
-        weights = self.model.get_weights().copy()
-        
-        # Rodar coleta de lixo para liberar memória
-        tf.keras.backend.clear_session()
-        gc.collect()
-        
+        # Guardar os pesos
+        weights = [w.copy() for w in self.model.get_weights()]
+
+        # Liberar memória se não for reaproveitar o modelo
+        if not self.reuse_client_model:
+            try:
+                del self.model
+                self.model = None
+            finally:
+                tf.keras.backend.clear_session()
+                gc.collect()
+
         return weights, self.num_examples, final_loss, final_accuracy
     
     def evaluate_model(self) -> Dict[str, float]:
