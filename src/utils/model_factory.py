@@ -28,6 +28,10 @@ class ModelFactory:
             return self._create_resnet18(input_shape, num_classes, learning_rate)
         elif model_name == "GENERIC_MODEL":
             return self._create_generic_model(input_shape, num_classes, learning_rate)
+        elif model_name == "DNN_MNIST":
+            return self._create_dnn_mnist(input_shape, num_classes, learning_rate)
+        elif model_name == "CNN_MNIST":
+            return self._create_cnn_mnist(input_shape, num_classes, learning_rate)
         else:
             # Modelo padrão se o tipo não for reconhecido
             print(f"Modelo '{model_name}' não reconhecido. Usando modelo genérico.")
@@ -211,4 +215,65 @@ class ModelFactory:
         model.compile(optimizer=tf.keras.optimizers.Adam(learning_rate=lr),
                       loss='categorical_crossentropy',
                       metrics=['accuracy'])
+        return model
+    
+    # ==================== MNIST ====================
+    def _create_dnn_mnist(self, input_shape: Tuple, num_classes: int,
+                      learning_rate: float | None = None) -> tf.keras.Model:
+        """
+        MNIST DNN leve (~60% menos parâmetros que o 2NN original).
+        """
+        model = tf.keras.Sequential([
+            tf.keras.layers.Flatten(input_shape=input_shape[1:]),
+            tf.keras.layers.Dense(128, activation='relu'),
+            tf.keras.layers.Dense(64, activation='relu'),
+            tf.keras.layers.Dense(num_classes, activation='softmax')
+        ])
+
+        lr = learning_rate if learning_rate is not None else 5e-3
+        model.compile(
+            optimizer=tf.keras.optimizers.Adam(learning_rate=lr),
+            loss='categorical_crossentropy',
+            metrics=['accuracy']
+        )
+        return model
+
+
+    def _create_cnn_mnist(self, input_shape: Tuple, num_classes: int,
+                      learning_rate: float | None = None) -> tf.keras.Model:
+        """
+        CNN leve (~4x mais rápida, mantendo boa acurácia).
+        """
+        # model = tf.keras.Sequential([
+        #     tf.keras.layers.Conv2D(16, kernel_size=3, activation='relu', input_shape=input_shape[1:]),
+        #     tf.keras.layers.MaxPooling2D(pool_size=2),
+        #     tf.keras.layers.Conv2D(32, kernel_size=3, activation='relu'),
+        #     tf.keras.layers.MaxPooling2D(pool_size=2),
+        #     tf.keras.layers.Flatten(),
+        #     tf.keras.layers.Dense(128, activation='relu'),
+        #     tf.keras.layers.Dense(num_classes, activation='softmax')
+        # ])
+        model = tf.keras.Sequential([
+            # Reduzimos os filtros pela metade
+            tf.keras.layers.Conv2D(8, kernel_size=3, activation='relu', input_shape=input_shape[1:]),
+            tf.keras.layers.MaxPooling2D(pool_size=2),
+            
+            # Reduzimos os filtros pela metade
+            tf.keras.layers.Conv2D(16, kernel_size=3, activation='relu'),
+            tf.keras.layers.MaxPooling2D(pool_size=2),
+            
+            tf.keras.layers.Flatten(),
+            
+            # Reduzimos a camada densa para 64 unidades
+            tf.keras.layers.Dense(64, activation='relu'),
+            
+            tf.keras.layers.Dense(num_classes, activation='softmax')
+        ])
+
+        lr = learning_rate if learning_rate is not None else 1e-3
+        model.compile(
+            optimizer=tf.keras.optimizers.Adam(learning_rate=lr),
+            loss='categorical_crossentropy',
+            metrics=['accuracy']
+        )
         return model

@@ -138,14 +138,17 @@ class FLServer:
         # Configura o manipulador de arquivo
         log_file = os.path.join(self.logs_dir, 'server.log')
         
-        # Configura o logger raiz
-        logging.basicConfig(
-            level=getattr(logging, log_level),
-            format='%(asctime)s - %(name)s - %(levelname)s - %(message)s'
-        )
-        
-        # Cria o logger para este componente
+        # Cria o logger dedicado para este componente
         self.logger = logging.getLogger("FLServer")
+        self.logger.setLevel(getattr(logging, log_level))
+        self.logger.propagate = False
+        # Remove handlers antigos para evitar sobreposição de logs entre execuções
+        for h in list(self.logger.handlers):
+            try:
+                self.logger.removeHandler(h)
+                h.close()
+            except Exception:
+                pass
         
         # Cria manipulador de arquivo
         file_handler = logging.FileHandler(log_file)
@@ -414,7 +417,7 @@ class FLServer:
         
         return weights
 
-    def start_round(self):
+    def start_round(self, available_clients: List[int] | None = None):
         """
         Inicia uma nova rodada de treinamento.
         
@@ -429,7 +432,8 @@ class FLServer:
         self.round_updates = {}
         
         # Selecionar clientes para esta rodada
-        available_clients = list(range(1, self.clients_config['num_clients'] + 1))
+        if available_clients is None:
+            available_clients = list(range(1, self.clients_config['num_clients'] + 1))
         all_selected_clients = self.select_clients(self.current_round, available_clients)
         
         # Inicializar a fila de clientes e clientes ativos
@@ -552,6 +556,12 @@ class FLServer:
             # Limpar timers para próxima rodada
             self.client_start_times.clear()
             
+            # Pré-calcular soma de exemplos para armazenar em métricas antes de liberar memória
+            try:
+                num_examples_sum = sum(self.round_updates[client_id][1] for client_id in self.selected_clients)
+            except Exception:
+                num_examples_sum = None
+
             # Avaliar modelo se necessário
             if self.current_round % self.server_config['evaluation_interval'] == 0:
                 metrics = self.evaluate_model()
@@ -566,11 +576,22 @@ class FLServer:
                 self.metrics['selected_clients'].append(self.selected_clients)
                 self.metrics['aggregated_clients'].append(self.aggregated_clients_this_round)
                 self.metrics['model_updated'].append(self.was_model_updated_this_round)
-                self.metrics['num_examples'].append(sum(self.round_updates[client_id][1] for client_id in self.selected_clients))
+                if num_examples_sum is None:
+                    try:
+                        num_examples_sum = sum(self.round_updates[client_id][1] for client_id in self.selected_clients)
+                    except Exception:
+                        num_examples_sum = 0
+                self.metrics['num_examples'].append(num_examples_sum)
 
                 # Salvar métricas atualizadas
                 self.save_metrics()
             
+            # Liberar atualizações da rodada o quanto antes para reduzir pressão de memória
+            try:
+                self.round_updates.clear()
+            except Exception:
+                self.round_updates = {}
+
             # Verificar se é a última rodada
             if self.current_round == self.total_rounds:
 
@@ -579,6 +600,11 @@ class FLServer:
                 final_model_path = os.path.join(self.base_dir, 'model_final.h5')
                 self.model.save(final_model_path)
                 self.logger.info(f"Treinamento federado concluído. Modelo final salvo em {final_model_path}")
+                # Garantir que métricas sejam persistidas ao final, mesmo se o intervalo de avaliação não alinhar
+                try:
+                    self.save_metrics()
+                except Exception as e:
+                    self.logger.error(f"Falha ao salvar métricas finais: {e}")
         return 
     
     def get_round_status(self) -> Dict[str, Any]:

@@ -75,15 +75,17 @@ class FLClient:
     def setup_logging(self):
         """Configura o sistema de logging."""
         log_level = self.experiment_config.get('log_level', 'info').upper()
-        
-        # Configura o logger raiz
-        logging.basicConfig(
-            level=getattr(logging, log_level),
-            format='%(asctime)s - %(name)s - %(levelname)s - %(message)s'
-        )
-        
-        # Cria o logger para este componente
+        # Cria o logger dedicado deste componente (sem propagação para o root)
         self.logger = logging.getLogger(f"FLClient-{self.client_id}")
+        self.logger.setLevel(getattr(logging, log_level))
+        self.logger.propagate = False
+        # Limpa handlers antigos para evitar que logs de execuções diferentes se sobreponham
+        for h in list(self.logger.handlers):
+            try:
+                self.logger.removeHandler(h)
+                h.close()
+            except Exception:
+                pass
         
         # Se o servidor estiver disponível, podemos escrever no diretório de logs
         if self.experiment_dir:
@@ -330,24 +332,34 @@ class FLClient:
         effective_epochs = local_epochs
         self.logger.info(f"Iniciando treinamento local por {effective_epochs} épocas")
         
-        # Criar pipeline tf.data leve (prefetch para throughput)
-        ds = tf.data.Dataset.from_tensor_slices((self.x_train, self.y_train))
-        ds = ds.batch(batch_size).prefetch(tf.data.AUTOTUNE)
+        # Se não houver dados, evite chamar .fit() para não gerar erros do Keras
+        if self.num_examples <= 0:
+            self.logger.warning(
+                "Cliente sem dados de treino (0 exemplos). Pulando treinamento e retornando pesos inalterados."
+            )
+            weights = [w.copy() for w in self.model.get_weights()]
+            final_loss = float('nan')
+            final_accuracy = float('nan')
+            # Não liberar o modelo ainda; fluxo abaixo cuida disso conforme reuse_client_model
+        else:
+            # Criar pipeline tf.data leve (prefetch para throughput)
+            ds = tf.data.Dataset.from_tensor_slices((self.x_train, self.y_train))
+            ds = ds.batch(batch_size).prefetch(tf.data.AUTOTUNE)
 
-        # Treinar o modelo
-        history = self.model.fit(
-            ds,
-            epochs=effective_epochs,
-            verbose=self.keras_verbose
-        )
-        
-        # Logs de métricas
-        final_loss = history.history['loss'][-1]
-        final_accuracy = history.history['accuracy'][-1]
-        self.logger.info(f"Treinamento concluído. Loss: {final_loss:.4f}, Accuracy: {final_accuracy:.4f}")
-        
-        # Guardar os pesos
-        weights = [w.copy() for w in self.model.get_weights()]
+            # Treinar o modelo
+            history = self.model.fit(
+                ds,
+                epochs=effective_epochs,
+                verbose=self.keras_verbose
+            )
+            
+            # Logs de métricas
+            final_loss = history.history['loss'][-1]
+            final_accuracy = history.history['accuracy'][-1]
+            self.logger.info(f"Treinamento concluído. Loss: {final_loss:.4f}, Accuracy: {final_accuracy:.4f}")
+            
+            # Guardar os pesos
+            weights = [w.copy() for w in self.model.get_weights()]
 
         # Liberar memória se não for reaproveitar o modelo
         if not self.reuse_client_model:

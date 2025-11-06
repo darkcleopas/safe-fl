@@ -3,18 +3,15 @@
 Script completo para comparação de defesas em Federated Learning.
 Este script foi refatorado para separar a execução da análise.
 - ExperimentRunner: Lida com a geração de configurações e execução de simulações.
-- ResultAnalyzer: Lida com o carregamento, análise e visualização de resultados.
+- ResultAnalyzer: Lida com o carregamento e análise de resultados.
 """
 
-import os
 import sys
 import subprocess
 import yaml
 import json
 import time
 import pandas as pd
-import matplotlib.pyplot as plt
-import seaborn as sns
 from pathlib import Path
 from datetime import datetime
 import numpy as np
@@ -27,12 +24,7 @@ import ast
 # (Assumindo que fl_simulator está no mesmo diretório ou no PYTHONPATH)
 # sys.path.append(os.path.dirname(os.path.abspath(__file__)))
 
-# Importe o simulador (certifique-se de que o import funcione no seu ambiente)
-try:
-    from fl_simulator import FLSimulator
-except ImportError:
-    print("AVISO: Não foi possível importar FLSimulator. O modo de execução não funcionará.")
-    FLSimulator = None
+# A verificação de import do simulador foi movida para dentro do main (modo execução)
 
 
 def slugify(text):
@@ -52,7 +44,7 @@ def ensure_list(x):
 
 class ResultAnalyzer:
     """
-    Classe para carregar, analisar e visualizar resultados de experimentos.
+    Classe para carregar e analisar resultados de experimentos.
     """
     def __init__(self, simulation_dir):
         """
@@ -63,8 +55,6 @@ class ResultAnalyzer:
         """
         self.base_dir = Path(simulation_dir)
         self.results_dir = self.base_dir / 'results'
-        self.plots_dir = self.base_dir / 'plots'
-        self.plots_dir.mkdir(parents=True, exist_ok=True)
 
         if not self.results_dir.exists():
             raise FileNotFoundError(f"Diretório de resultados não encontrado: {self.results_dir}")
@@ -108,12 +98,27 @@ class ResultAnalyzer:
 
                             # Extrai metadados do config.yaml
                             exp_name = config.get('experiment', {}).get('name', exp_dir.name)
-                            defense_name = "Sem Defesa"
-                            if config.get('server', {}).get('defense_pipeline'):
-                                defense_name = config.get('experiment', {}).get('defense_name', exp_name.split('_')[2]) # Fallback
+                            # Usa o nome da defesa do bloco experiment; fallback seguro
+                            defense_name = config.get('experiment', {}).get('defense_name', 'Sem Defesa')
 
                             attack_rate = config.get('clients', {}).get('malicious_percentage', 0.0)
                             sel_frac = config.get('server', {}).get('selection_fraction', 0.0)
+                            
+                            # Listas de métricas podem estar vazias se a simulação falhou cedo
+                            acc_list = metrics.get('accuracy') or []
+                            loss_list = metrics.get('loss') or []
+                            prec_list = metrics.get('precision') or []
+                            rec_list = metrics.get('recall') or []
+                            f1_list = metrics.get('f1') or []
+
+                            # Determina se o experimento foi concluído com sucesso
+                            total_rounds_config = config.get('experiment', {}).get('rounds')
+                            rounds_executados = len(metrics.get('rounds', [])) if isinstance(metrics.get('rounds', []), list) else len(acc_list)
+                            try:
+                                total_rounds_config_int = int(total_rounds_config) if total_rounds_config is not None else None
+                            except (TypeError, ValueError):
+                                total_rounds_config_int = None
+                            is_success = (total_rounds_config_int is not None) and (rounds_executados >= total_rounds_config_int)
 
                             self.all_results[exp_name] = {
                                 'config_path': str(config_file),
@@ -135,12 +140,12 @@ class ResultAnalyzer:
                                 'keras_verbose': config.get('experiment', {}).get('keras_verbose', 0),
                                 'malicious_clients': malicious_clients,
                                 'metrics': metrics,
-                                'final_accuracy': metrics.get('accuracy', [0.0])[-1],
-                                'final_loss': metrics.get('loss', [float('inf')])[-1],
-                                'final_precision': metrics.get('precision', [0.0])[-1],
-                                'final_recall': metrics.get('recall', [0.0])[-1],
-                                'final_f1': metrics.get('f1', [0.0])[-1],
-                                'success': True,
+                                'final_accuracy': acc_list[-1] if acc_list else 0.0,
+                                'final_loss': loss_list[-1] if loss_list else float('inf'),
+                                'final_precision': prec_list[-1] if prec_list else 0.0,
+                                'final_recall': rec_list[-1] if rec_list else 0.0,
+                                'final_f1': f1_list[-1] if f1_list else 0.0,
+                                'success': is_success,
                             }
                         except Exception as e:
                             print(f"❌ Erro ao processar o diretório {exp_dir.name}: {e}")
@@ -152,21 +157,25 @@ class ResultAnalyzer:
         return True
     
     def run_full_analysis(self):
-        """Executa o pipeline completo de análise: carregar dados, processar e criar plots."""
-        if self.load_results():
+        """Executa o pipeline completo de análise: carregar dados e processar."""
+        # Evita revarrer se já está carregado
+        if not self.all_results:
+            if not self.load_results():
+                print("Análise interrompida.")
+                return
+
+        if self.all_results:
             # NOVO: Instancia o processador para gerar DataFrame e gráficos
-            processor = ResultProcessor(self.all_results, self.plots_dir, self.results_dir)
+            processor = ResultProcessor(self.all_results, self.results_dir)
             processor.generate_and_save_dataframe()
             processor.generate_final_metrics_summary()
-            processor.create_all_plots()
         else:
             print("Análise interrompida.")
 
 
 class ResultProcessor:
-    def __init__(self, all_results, plots_dir, results_dir):
+    def __init__(self, all_results, results_dir):
         self.all_results = all_results
-        self.plots_dir = plots_dir
         self.results_dir = results_dir
 
     def generate_and_save_dataframe(self):
@@ -196,45 +205,49 @@ class ResultProcessor:
                 default_list = [None] * num_rounds
                 default_bool_list = [False] * num_rounds
 
-                round_data = {
-                    "experiment_id": exp_id,
-                    "defense": exp_details.get("defense"),
-                    "attack_rate": exp_details.get("attack_rate"),
-                    "selection_fraction": exp_details.get("selection_fraction"),
-                    "selection_strategy": exp_details.get("selection_strategy"),
-                    "dataset_name": exp_details.get("dataset_name"),
-                    "non_iid": exp_details.get("non_iid"),
-                    "dirichlet_alpha": exp_details.get("dirichlet_alpha"),
-                    "model_type": exp_details.get("model_type"),
-                    "local_epochs": exp_details.get("local_epochs"),
-                    "batch_size": exp_details.get("batch_size"),
-                    "learning_rate": exp_details.get("learning_rate"),
-                    "rounds_total": exp_details.get("rounds_total"),
-                    "num_clients": exp_details.get("num_clients"),
-                    "seed": exp_details.get("seed"),
-                    "reuse_client_model": exp_details.get("reuse_client_model"),
-                    "keras_verbose": exp_details.get("keras_verbose"),
-                    "malicious_clients": malicious_clients_str,
-                    "round": metrics.get("rounds")[i],
-                    "accuracy": metrics.get("accuracy")[i],
-                    "loss": metrics.get("loss")[i],
-                    "precision": metrics.get("precision", default_list)[i],
-                    "recall": metrics.get("recall", default_list)[i],
-                    "f1_score": metrics.get("f1", default_list)[i],
-                    "aggregation_time": metrics.get("aggregation_time", default_list)[i],
-                    "round_time": metrics.get("round_time", default_list)[i],
-                    "communication_bytes": metrics.get("communication_bytes", default_list)[i],
-                    "selected_clients": str(metrics.get("selected_clients", default_list)[i]),
-                    "aggregated_clients": str(metrics.get("aggregated_clients", default_list)[i]),
-                    "model_updated": metrics.get("model_updated", default_bool_list)[i],
-                    "final_accuracy": exp_details.get("final_accuracy"),
-                    "final_loss": exp_details.get("final_loss"),
-                    "final_precision": exp_details.get("final_precision"),
-                    "final_recall": exp_details.get("final_recall"),
-                    "final_f1_score": exp_details.get("final_f1"),
-                    "success": exp_details.get("success"),
-                }
-                all_experiments_data.append(round_data)
+                try:
+                    round_data = {
+                        "experiment_id": exp_id,
+                        "defense": exp_details.get("defense"),
+                        "attack_rate": exp_details.get("attack_rate"),
+                        "selection_fraction": exp_details.get("selection_fraction"),
+                        "selection_strategy": exp_details.get("selection_strategy"),
+                        "dataset_name": exp_details.get("dataset_name"),
+                        "non_iid": exp_details.get("non_iid"),
+                        "dirichlet_alpha": exp_details.get("dirichlet_alpha"),
+                        "model_type": exp_details.get("model_type"),
+                        "local_epochs": exp_details.get("local_epochs"),
+                        "batch_size": exp_details.get("batch_size"),
+                        "learning_rate": exp_details.get("learning_rate"),
+                        "rounds_total": exp_details.get("rounds_total"),
+                        "num_clients": exp_details.get("num_clients"),
+                        "seed": exp_details.get("seed"),
+                        "reuse_client_model": exp_details.get("reuse_client_model"),
+                        "keras_verbose": exp_details.get("keras_verbose"),
+                        "malicious_clients": malicious_clients_str,
+                        "round": metrics.get("rounds")[i],
+                        "accuracy": metrics.get("accuracy")[i],
+                        "loss": metrics.get("loss")[i],
+                        "precision": metrics.get("precision", default_list)[i],
+                        "recall": metrics.get("recall", default_list)[i],
+                        "f1_score": metrics.get("f1", default_list)[i],
+                        "aggregation_time": metrics.get("aggregation_time", default_list)[i],
+                        "round_time": metrics.get("round_time", default_list)[i],
+                        "communication_bytes": metrics.get("communication_bytes", default_list)[i],
+                        "selected_clients": str(metrics.get("selected_clients", default_list)[i]),
+                        "aggregated_clients": str(metrics.get("aggregated_clients", default_list)[i]),
+                        "model_updated": metrics.get("model_updated", default_bool_list)[i],
+                        "final_accuracy": exp_details.get("final_accuracy"),
+                        "final_loss": exp_details.get("final_loss"),
+                        "final_precision": exp_details.get("final_precision"),
+                        "final_recall": exp_details.get("final_recall"),
+                        "final_f1_score": exp_details.get("final_f1"),
+                        "success": exp_details.get("success"),
+                    }
+                    all_experiments_data.append(round_data)
+                except (IndexError, TypeError, KeyError):
+                    print(f"⚠️  Aviso: Pulando round {i} do exp {exp_id} devido a dados ausentes/corrompidos.")
+                    continue
 
         df = pd.DataFrame(all_experiments_data)
         df_path = self.results_dir / 'results_summary.csv'
@@ -363,7 +376,7 @@ class ResultProcessor:
             # Usar .dropna() para evitar erros se houver NaNs
             median_agg_time = df_exp['aggregation_time'].dropna().median()
             std_agg_time = df_exp['aggregation_time'].dropna().std()
-            total_time = df_exp['round_time'].sum()
+            total_time = df_exp['round_time'].dropna().sum()
             
             # Monta o dicionário com todos os resultados finais para este experimento
             exp_summary = {
@@ -404,7 +417,7 @@ class ResultProcessor:
                 'median_aggregation_time_s': median_agg_time,
                 'std_aggregation_time_s': std_agg_time,
                 'total_experiment_time_s': total_time,
-                'total_communication_mb': df_exp['communication_bytes'].sum() / (1024*1024),
+                'total_communication_mb': df_exp['communication_bytes'].dropna().sum() / (1024*1024),
             }
             final_results.append(exp_summary)
 
@@ -415,289 +428,6 @@ class ResultProcessor:
         
         print(f"✅ Tabela de métricas finais salva com sucesso em: {output_path}")
 
-    def create_all_plots(self):
-        """
-        Cria todos os plots de visualização a partir dos resultados carregados.
-        """
-        if not self.all_results:
-            print("⚠️ Sem dados para plotar. Pulando a criação de gráficos.")
-            return
-
-        print("\n🎨 Iniciando a criação de todos os gráficos...")
-
-        perf_data = []
-        for result in self.all_results.values():
-            if result.get('success'):
-                common_info = {
-                    'defense': result['defense'],
-                    'attack_rate': result['attack_rate'],
-                    'selection_fraction': result['selection_fraction'],
-                    'final_accuracy': result.get('final_accuracy', 0.0),
-                }
-                perf_data.append(common_info)
-
-        df_perf = pd.DataFrame(perf_data)
-        
-        defenses = sorted(df_perf['defense'].unique())
-        colors = plt.colormaps.get('tab10').colors
-        markers = ['o', 's', '^', 'D', 'v', 'p', '*', '<', '>', 'X']
-        defense_styles = {
-            defense: {'color': colors[i % len(colors)], 'marker': markers[i % len(markers)]}
-            for i, defense in enumerate(defenses)
-        }
-        
-        self._plot_accuracy_vs_attack(df_perf, defense_styles)
-        self._plot_performance_heatmap(df_perf)
-        self._plot_selection_impact(df_perf, defense_styles)
-        self._plot_temporal_evolution(defense_styles)
-        self._plot_cost_metrics(defense_styles)
-        print("✅ Gráficos criados com sucesso.")
-
-    def _plot_accuracy_vs_attack(self, df, defense_styles):
-        """
-        Plota a acurácia final vs. taxa de ataque para cada fração de seleção.
-        """
-        selection_fractions = sorted(df['selection_fraction'].unique())
-        if not selection_fractions: return
-
-        num_plots = len(selection_fractions)
-        fig, axes = plt.subplots(1, num_plots, figsize=(8 * num_plots, 6), squeeze=False)
-        axes = axes.flatten()
-
-        for i, sel_frac in enumerate(selection_fractions):
-            ax = axes[i]
-            df_sub = df[df['selection_fraction'] == sel_frac]
-
-            for defense, style in defense_styles.items():
-                defense_data = df_sub[df_sub['defense'] == defense].sort_values('attack_rate')
-                if not defense_data.empty:
-                    ax.plot(defense_data['attack_rate'] * 100, defense_data['final_accuracy'],
-                            label=defense, linewidth=2, markersize=7, alpha=0.9, **style)
-
-            ax.set_xlabel('Taxa de Ataque (%)', fontsize=12)
-            ax.set_ylabel('Acurácia Final', fontsize=12)
-            ax.set_title(f'Desempenho (Seleção de {int(sel_frac*100)}% dos Clientes)', fontsize=14, fontweight='bold')
-            ax.grid(True, linestyle='--', alpha=0.5)
-            ax.set_ylim(0, 1.05)
-            ax.legend(title='Defesas', fontsize=10)
-        
-        plt.tight_layout()
-        plot_path = self.plots_dir / 'accuracy_vs_attack_rate.png'
-        plt.savefig(plot_path, dpi=300, bbox_inches='tight')
-        plt.close(fig)
-        print(f"💾 Gráfico de Acurácia vs Ataque salvo em: {plot_path}")
-
-    def _plot_temporal_evolution(self, defense_styles):
-        """
-        Plota a evolução da acurácia ao longo dos rounds para diferentes cenários.
-        """
-        attack_rates = sorted(list({r['attack_rate'] for r in self.all_results.values() if r.get('success')}))
-        selection_fractions = sorted(list({r['selection_fraction'] for r in self.all_results.values() if r.get('success')}))
-
-        for sel_frac in selection_fractions:
-            
-            n_attacks = len(attack_rates)
-            if n_attacks == 0: continue
-            
-            cols = min(3, n_attacks)
-            rows = (n_attacks + cols - 1) // cols
-            fig, axes = plt.subplots(rows, cols, figsize=(7 * cols, 5 * rows), squeeze=False, sharey=True)
-            axes = axes.flatten()
-
-            for i, attack_rate in enumerate(attack_rates):
-                ax = axes[i]
-                
-                for exp_name, result in self.all_results.items():
-                    if (result.get('success') and
-                        result['attack_rate'] == attack_rate and
-                        result['selection_fraction'] == sel_frac):
-                        
-                        metrics = result['metrics']
-                        rounds = metrics.get('round', list(range(1, len(metrics.get('accuracy', [])) + 1))) # FLAG: Prioriza a chave 'round' se existir
-                        accuracies = metrics.get('accuracy', [])
-                        
-                        if rounds and accuracies:
-                            defense = result['defense']
-                            style = defense_styles.get(defense, {})
-                            ax.plot(rounds, accuracies, label=defense, linewidth=2, alpha=0.9, **style)
-
-                ax.set_title(f"Ataque: {int(attack_rate*100)}%", fontsize=12, fontweight='bold')
-                ax.set_xlabel('Round', fontsize=11)
-                ax.set_ylabel('Acurácia', fontsize=11)
-                ax.grid(True, linestyle='--', alpha=0.5)
-                ax.set_ylim(0, 1.05)
-
-            handles, labels = axes[0].get_legend_handles_labels()
-            fig.legend(handles, labels, loc='lower center', ncol=min(4, len(handles)), bbox_to_anchor=(0.5, 0), fontsize=11)
-            
-            for j in range(i + 1, len(axes)):
-                axes[j].set_visible(False)
-
-            fig.suptitle(f'Evolução da Acurácia (Seleção de {int(sel_frac*100)}%)', fontsize=16, fontweight='bold')
-            plt.tight_layout(rect=[0, 0.05, 1, 0.95])
-            
-            plot_path = self.plots_dir / f'temporal_evolution_sel_{int(sel_frac*100)}.png'
-            plt.savefig(plot_path, dpi=300, bbox_inches='tight')
-            plt.close(fig)
-            print(f"💾 Gráfico de Evolução Temporal salvo em: {plot_path}")
-    
-    def _plot_performance_heatmap(self, df):
-        """Cria um heatmap de acurácia (Defesa vs. Taxa de Ataque) para cada fração de seleção."""
-        selection_fractions = sorted(df['selection_fraction'].unique())
-        
-        for sel_frac in selection_fractions:
-            df_sub = df[df['selection_fraction'] == sel_frac]
-            if df_sub.empty: continue
-            
-            pivot_table = df_sub.pivot_table(
-                index='defense', columns='attack_rate', values='final_accuracy'
-            )
-            
-            plt.figure(figsize=(12, 8))
-            sns.heatmap(
-                pivot_table,
-                annot=True, fmt=".3f", cmap="RdYlGn",
-                linewidths=.5, vmin=0, vmax=1,
-                cbar_kws={'label': 'Acurácia Final'}
-            )
-            plt.title(f'Heatmap de Acurácia (Seleção {int(sel_frac*100)}%)', fontsize=16, fontweight='bold')
-            plt.xlabel('Taxa de Ataque (%)', fontsize=12)
-            plt.xticks([i + 0.5 for i in range(len(pivot_table.columns))], [f'{int(c*100)}%' for c in pivot_table.columns])
-            plt.ylabel('Defesa', fontsize=12)
-            plt.tight_layout()
-            
-            plot_path = self.plots_dir / f'heatmap_performance_sel_{int(sel_frac*100)}.png'
-            plt.savefig(plot_path, dpi=300, bbox_inches='tight')
-            plt.close()
-            print(f"💾 Gráfico de Heatmap salvo em: {plot_path}")
-
-    def _plot_selection_impact(self, df, defense_styles):
-        """Plota o impacto na acurácia ao mudar a fração de seleção de clientes."""
-        selection_fractions = sorted(df['selection_fraction'].unique())
-        
-        if len(selection_fractions) != 2:
-            print("⚠️ Gráfico de Impacto de Seleção pulado (requer exatamente 2 frações de seleção).")
-            return
-            
-        frac_low, frac_high = selection_fractions[0], selection_fractions[1]
-        
-        pivot_low = df[df['selection_fraction'] == frac_low].pivot_table(index='defense', columns='attack_rate', values='final_accuracy')
-        pivot_high = df[df['selection_fraction'] == frac_high].pivot_table(index='defense', columns='attack_rate', values='final_accuracy')
-        
-        # Alinha os dataframes e calcula a diferença, preenchendo com 0 se um valor faltar
-        pivot_diff = pivot_high.subtract(pivot_low, fill_value=0)
-        
-        plt.figure(figsize=(10, 7))
-        for defense in pivot_diff.index:
-            style = defense_styles.get(defense, {})
-            plt.plot(
-                [c * 100 for c in pivot_diff.columns], pivot_diff.loc[defense], 
-                label=defense, linewidth=2, markersize=7, alpha=0.9,
-                marker=style.get('marker', 'o'), color=style.get('color')
-            )
-        
-        plt.axhline(0, color='black', linestyle='--', alpha=0.7)
-        plt.title('Impacto da Seleção de Clientes na Acurácia', fontsize=16, fontweight='bold')
-        plt.xlabel('Taxa de Ataque (%)', fontsize=12)
-        plt.ylabel(f'Melhora na Acurácia ({int(frac_high*100)}% - {int(frac_low*100)}%)', fontsize=12)
-        plt.legend(title='Defesas')
-        plt.grid(True, linestyle='--', alpha=0.5)
-        plt.tight_layout()
-        
-        plot_path = self.plots_dir / 'selection_impact.png'
-        plt.savefig(plot_path, dpi=300, bbox_inches='tight')
-        plt.close()
-        print(f"💾 Gráfico de Impacto da Seleção salvo em: {plot_path}")
-
-    def _plot_cost_metrics(self, defense_styles):
-        """
-        Cria boxplots para métricas de custo a partir dos dados brutos em self.all_results.
-        Cada boxplot mostra a distribuição dos valores de todos os rounds para cada defesa.
-        """
-        # 1. Preparar os dados em um formato "longo", ideal para o Seaborn
-        plot_data = []
-        for result in self.all_results.values():
-            if not result.get('success'):
-                continue
-
-            metrics = result.get('metrics', {})
-            base_info = {
-                'defense': result['defense'],
-                'selection_fraction': result['selection_fraction']
-            }
-
-            # Extrai cada valor individual de cada métrica de custo
-            for metric_name in ['communication_bytes', 'aggregation_time', 'round_time', 'memory_usage']:
-                if metric_name in metrics and metrics[metric_name]:
-                    for value in metrics[metric_name]:
-                        plot_data.append({**base_info, 'metric': metric_name, 'value': value})
-        
-        if not plot_data:
-            print("⚠️ Métricas de custo não encontradas nos resultados. Gráficos de custo pulados.")
-            return
-
-        df = pd.DataFrame(plot_data)
-
-        color_palette = {defense: style['color'] for defense, style in defense_styles.items()}
-
-        # 2. Iterar sobre cada fração de seleção e criar os gráficos
-        selection_fractions = sorted(df['selection_fraction'].unique())
-        
-        for sel_frac in selection_fractions:
-            df_sel = df[df['selection_fraction'] == sel_frac]
-            if df_sel.empty:
-                continue
-
-            # Mapeamento de métricas para títulos e conversões de unidade
-            cost_metrics_map = {
-                'communication_bytes': {'title': 'Comunicação por Round (MB)', 'divisor': 1024*1024, 'ylabel': 'MB'},
-                'aggregation_time': {'title': 'Tempo de Agregação (s)', 'divisor': 1, 'ylabel': 'Segundos'},
-                'round_time': {'title': 'Tempo Total por Round (s)', 'divisor': 1, 'ylabel': 'Segundos'},
-                'memory_usage': {'title': 'Uso de Memória (MB)', 'divisor': 1, 'ylabel': 'MB'}
-            }
-            
-            fig, axes = plt.subplots(2, 2, figsize=(16, 12))
-            axes = axes.flatten()
-
-            for i, (metric, props) in enumerate(cost_metrics_map.items()):
-                ax = axes[i]
-                metric_data = df_sel[df_sel['metric'] == metric].copy()
-                
-                if not metric_data.empty:
-                    # Aplica a conversão de unidade
-                    metric_data['value'] = metric_data['value'] / props['divisor']
-                    
-                    sns.boxplot(ax=ax, data=metric_data, x='defense', y='value', palette=color_palette, hue='defense')
-                    ax.set_title(props['title'], fontsize=14, fontweight='bold')
-                    ax.set_xlabel('')
-                    ax.set_ylabel(props['ylabel'], fontsize=12)
-                    ax.tick_params(axis='x', rotation=45, labelsize=11)
-                    ax.grid(True, linestyle='--', alpha=0.5)
-                else:
-                    ax.text(0.5, 0.5, 'Dados não disponíveis', ha='center', va='center', fontsize=12, color='gray')
-                    ax.set_xticks([])
-                    ax.set_yticks([])
-
-            fig.suptitle(f'Análise de Custo Computacional (Seleção {int(sel_frac*100)}%)', fontsize=18, fontweight='bold')
-            plt.tight_layout(rect=[0, 0, 1, 0.96])
-
-            plot_path = self.plots_dir / f'cost_metrics_sel_{int(sel_frac*100)}.png'
-            plt.savefig(plot_path, dpi=300, bbox_inches='tight')
-            plt.close(fig)
-            print(f"💾 Gráfico de Métricas de Custo salvo em: {plot_path}")
-    
-    def run_full_analysis(self):
-        """Executa o pipeline completo de análise: carregar dados e criar plots."""
-        # O método retorna True se resultados foram carregados, False caso contrário.
-        if self.load_results():
-            # Gerar CSV detalhado e resumo final antes dos gráficos
-            processor = ResultProcessor(self.all_results, self.plots_dir, self.results_dir)
-            processor.generate_and_save_dataframe()
-            processor.generate_final_metrics_summary()
-            processor.create_all_plots()
-        else:
-            # A mensagem de "Nenhum resultado" já é impressa dentro de load_results.
-            print("Análise interrompida.")
 
 
 class ExperimentRunner:
@@ -705,78 +435,7 @@ class ExperimentRunner:
     Classe para gerar configurações e executar a simulação de experimentos.
     """
     def __init__(self, resume_dir=None):
-        # self.defense_pipelines = {
-        #     'var 1': { 'client_filters': [{'name': 'L2_DIRECTIONAL_FILTER','params': {'window_size': 7, 'std_dev_multiplier': 1.5, 'min_rounds_history': 7}}],'aggregation_strategy': {'name': 'FED_AVG'},'global_model_filter': {'name': 'L2_GLOBAL_MODEL_FILTER','params': {'window_size': 7, 'std_dev_multiplier': 1.5, 'min_rounds_history': 7}}},
-        #     # 'var 2': { 'client_filters': [{'name': 'L2_DIRECTIONAL_FILTER','params': {'window_size': 5, 'std_dev_multiplier': 1.5, 'min_rounds_history': 5}}],'aggregation_strategy': {'name': 'FED_AVG'},'global_model_filter': {'name': 'L2_GLOBAL_MODEL_FILTER','params': {'window_size': 5, 'std_dev_multiplier': 1.5, 'min_rounds_history': 5}}},
-        #     # 'var 3': { 'client_filters': [{'name': 'L2_DIRECTIONAL_FILTER','params': {'window_size': 3, 'std_dev_multiplier': 1.5, 'min_rounds_history': 3}}],'aggregation_strategy': {'name': 'FED_AVG'},'global_model_filter': {'name': 'L2_GLOBAL_MODEL_FILTER','params': {'window_size': 3, 'std_dev_multiplier': 1.5, 'min_rounds_history': 3}}},
-        #     # 'var 4': { 'client_filters': [{'name': 'L2_DIRECTIONAL_FILTER','params': {'window_size': 7, 'std_dev_multiplier': 1.7, 'min_rounds_history': 7}}],'aggregation_strategy': {'name': 'FED_AVG'},'global_model_filter': {'name': 'L2_GLOBAL_MODEL_FILTER','params': {'window_size': 7, 'std_dev_multiplier': 1.7, 'min_rounds_history': 7}}},
-        #     # 'var 5': { 'client_filters': [{'name': 'L2_DIRECTIONAL_FILTER','params': {'window_size': 5, 'std_dev_multiplier': 1.7, 'min_rounds_history': 5}}],'aggregation_strategy': {'name': 'FED_AVG'},'global_model_filter': {'name': 'L2_GLOBAL_MODEL_FILTER','params': {'window_size': 5, 'std_dev_multiplier': 1.7, 'min_rounds_history': 5}}},
-        #     # 'var 6': { 'client_filters': [{'name': 'L2_DIRECTIONAL_FILTER','params': {'window_size': 3, 'std_dev_multiplier': 1.7, 'min_rounds_history': 3}}],'aggregation_strategy': {'name': 'FED_AVG'},'global_model_filter': {'name': 'L2_GLOBAL_MODEL_FILTER','params': {'window_size': 3, 'std_dev_multiplier': 1.7, 'min_rounds_history': 3}}}
-        # }
         self.defense_pipelines = {
-            # --- GRUPO 1: Baselines (Sem Filtros de Cliente) ---
-            # Objetivo: Medir a performance base e o efeito de agregadores robustos.
-
-            # 'Média Ponderada (Baseline)': {
-            #     'client_filters': [],
-            #     'aggregation_strategy': {'name': 'FED_AVG', 'params': {}},
-            #     'global_model_filter': None
-            # },
-            # 'Média Aparada': {
-            #     'client_filters': [],
-            #     'aggregation_strategy': {'name': 'TRIMMED_MEAN', 'params': {'trim_ratio': 0.4}},
-            #     'global_model_filter': None
-            # },
-
-            # --- GRUPO 2: Filtros de Cliente + Agregação Padrão ---
-            # Objetivo: Isolar e medir a eficácia de cada filtro de cliente.
-
-            # 'Filtro Krum + Média Ponderada': {
-            #     'client_filters': [{'name': 'KRUM', 'params': {}}],
-            #     'aggregation_strategy': {'name': 'FED_AVG'},
-            #     'global_model_filter': None
-            # },
-            # 'Filtro Multi-Krum + Média Ponderada': {
-            #     'client_filters': [{'name': 'MULTI_KRUM', 'params': {}}],
-            #     'aggregation_strategy': {'name': 'FED_AVG'},
-            #     'global_model_filter': None
-            # },
-            # 'Filtro Clustering + Média Ponderada': {
-            #     'client_filters': [{'name': 'CLUSTERING', 'params': {}}],
-            #     'aggregation_strategy': {'name': 'FED_AVG'},
-            #     'global_model_filter': None
-            # },
-            # 'Filtro L2 Direcional + Média Ponderada': {
-            #     'client_filters': [{
-            #         'name': 'L2_DIRECTIONAL_FILTER',
-            #         'params': {'window_size': 3, 'std_dev_multiplier': 1.5, 'min_rounds_history': 3}
-            #     }],
-            #     'aggregation_strategy': {'name': 'FED_AVG'},
-            #     'global_model_filter': None
-            # },
-
-            # --- GRUPO 3: Pipelines de Defesa em Múltiplas Camadas ---
-            # Objetivo: Testar o efeito combinado de diferentes tipos de filtros e agregadores.
-
-            # 'Média Ponderada + Filtro L2 Global': {
-            #     'client_filters': [],
-            #     'aggregation_strategy': {'name': 'FED_AVG'},
-            #     'global_model_filter': {
-            #         'name': 'L2_GLOBAL_MODEL_FILTER',
-            #         'params': {'window_size': 3, 'std_dev_multiplier': 1.5, 'min_rounds_history': 3}
-            #     }
-            # },
-            # 'Filtro L2 Direcional + Média Ponderada + Filtro L2 Global': {
-            #     'client_filters': [{
-            #         'name': 'L2_DIRECTIONAL_FILTER',
-            #         'params': {'window_size': 3, 'std_dev_multiplier': 1.5, 'min_rounds_history': 3}
-            #     }],
-            #     'aggregation_strategy': {'name': 'FED_AVG'},
-            #     'global_model_filter': {
-            #         'name': 'L2_GLOBAL_MODEL_FILTER',
-            #         'params': {'window_size': 3, 'std_dev_multiplier': 1.5, 'min_rounds_history': 3}
-            #     }
-            # },
             'Filtro Clustering + Média Ponderada + Filtro L2 Global': {
                 'client_filters': [{'name': 'CLUSTERING', 'params': {}}],
                 'aggregation_strategy': {'name': 'FED_AVG'},
@@ -797,8 +456,9 @@ class ExperimentRunner:
         self.num_clients = 10
         self.local_epochs = 2
         self.batch_size = 16
-        self.learning_rate = None  # Pode ser lista no suite
-        self.dirichlet_alpha = None  # Pode ser lista no suite
+        # Defaults explícitos para evitar omissões silenciosas via suite
+        self.learning_rate = 1e-4  # Pode ser lista no suite
+        self.dirichlet_alpha = 0.1  # Pode ser lista no suite
         self.seed = 42
 
         self.save_client_models = False
@@ -828,8 +488,30 @@ class ExperimentRunner:
 
         analyzer = ResultAnalyzer(self.base_dir)
         if analyzer.load_results():
-            self.existing_exp_names = set(analyzer.all_results.keys())
+            # Considera apenas experimentos marcados como sucesso
+            self.existing_exp_names = {
+                name for name, v in analyzer.all_results.items()
+                if isinstance(v, dict) and v.get('success', False)
+            }
         print(f"✅ Encontrados {len(self.existing_exp_names)} resultados existentes.")
+
+    def collect_configs_from_directory(self):
+        """Coleta todos os arquivos YAML em self.config_dir como fonte de verdade em retomadas.
+
+        Returns:
+            Dict[str, Path]: mapping de experiment_name -> caminho do YAML
+        """
+        configs = {}
+        if not self.config_dir.exists():
+            return configs
+        for cfg_path in sorted(self.config_dir.glob('*.yaml')):
+            try:
+                exp_name = cfg_path.stem
+                configs[exp_name] = cfg_path
+            except Exception:
+                # Pula qualquer arquivo estranho
+                continue
+        return configs
 
     def generate_all_configs(self):
         """Gera um dicionário com todas as configurações de experimentos planejados."""
@@ -848,7 +530,11 @@ class ExperimentRunner:
                                                 for attack_rate in ensure_list(self.attack_rates):
                                                     for sel_frac in ensure_list(self.selection_fractions):
                                                         for non_iid in ensure_list(self.non_iid):
-                                                            alpha_list = ensure_list(self.dirichlet_alpha) if self.dirichlet_alpha is not None else [None]
+                                                            # Se for IID, dirichlet_alpha não se aplica
+                                                            if bool(non_iid):
+                                                                alpha_list = ensure_list(self.dirichlet_alpha) if self.dirichlet_alpha is not None else [None]
+                                                            else:
+                                                                alpha_list = [None]
                                                             for dir_alpha in alpha_list:
                                                                 # Nome do experimento contendo todas variações relevantes
                                                                 attack_part = f"lf_{int(attack_rate*100)}" if attack_rate and attack_rate > 0 else "no_attack"
@@ -864,7 +550,7 @@ class ExperimentRunner:
                                                                 lr_part = f"lr_{learning_rate}" if learning_rate is not None else "lr_default"
                                                                 seed_part = f"s_{seed}"
                                                                 niid_part = 'non_iid' if non_iid else 'iid'
-                                                                alpha_part = f"alpha_{dir_alpha}" if dir_alpha is not None else None
+                                                                alpha_part = f"alpha_{dir_alpha}" if (bool(non_iid) and dir_alpha is not None) else None
                                                                 name_parts = [attack_part, defense_part, sf_part, strat_part, ds_part, model_part, rounds_part, clients_part, epochs_part, bs_part, lr_part, seed_part, niid_part]
                                                                 if alpha_part:
                                                                     name_parts.append(alpha_part)
@@ -887,7 +573,7 @@ class ExperimentRunner:
                                                                     'dataset': {
                                                                         'name': dataset_name,
                                                                         'non_iid': bool(non_iid),
-                                                                        'dirichlet_alpha': float(dir_alpha) if (dir_alpha is not None) else None
+                                                                        'dirichlet_alpha': float(dir_alpha) if (bool(non_iid) and dir_alpha is not None) else None
                                                                     },
                                                                     'model': {
                                                                         'type': model_name,
@@ -920,20 +606,54 @@ class ExperimentRunner:
         num_pending_experiments = len(configs)
         if num_pending_experiments == 0:
             return 0
+        
+        # Estimativas baseadas no tipo de modelo por round completo
+        # O comentário "considerando 100 clientes" é a chave
+        model_time_estimates_per_round = {
+            'CNN_MNIST': 6,  # segundos para 100 clientes
+            'DNN_MNIST': 2,  # segundos para 100 clientes
+        }
+        N_BASE_CLIENTS = 100.0  # Baseline de clientes para as estimativas acima
+        DEFAULT_TIME = 6.0     # Tempo padrão se o modelo não for encontrado
 
-        base_time_per_client_per_round = 6 / self.num_clients  # segundos (estimativa conservadora)
+        # 1. Calcular o tempo médio por cliente, com base nos modelos nos configs
+        model_times_per_client = []
+        for cfg in configs.values():
+            model_type = cfg.get('model', {}).get('type')
+            # Obter o tempo base (para 100 clientes) ou usar o padrão
+            time_base_100_clients = model_time_estimates_per_round.get(model_type, DEFAULT_TIME)
+            # Calcular o tempo por cliente individual
+            time_per_client = time_base_100_clients / N_BASE_CLIENTS
+            model_times_per_client.append(time_per_client)
 
-        avg_selection_fraction = np.mean(self.selection_fractions) if self.selection_fractions else 0
-        avg_clients_per_round = self.num_clients * avg_selection_fraction
-        avg_time_per_round = avg_clients_per_round * base_time_per_client_per_round
-        avg_time_per_experiment = self.rounds * avg_time_per_round
+        if not model_times_per_client:
+            return 0  # Não deveria acontecer se num_pending_experiments > 0, mas é seguro
+
+        avg_time_per_client_per_round = np.mean(model_times_per_client)
+
+        # 2. Obter parâmetros médios da suíte (corrigindo bugs de 'None')
+        # Preservando sua lógica 'ensure_list'
+        avg_selection_fraction = float(np.mean(ensure_list(self.selection_fractions))) if self.selection_fractions is not None else 0.0
+        avg_num_clients = float(np.mean(ensure_list(self.num_clients))) if self.num_clients is not None else 0.0
+        avg_rounds = float(np.mean(ensure_list(self.rounds))) if self.rounds is not None else 0.0
+
+        # 3. Calcular o tempo com base na nova lógica (corrigida)
+        avg_clients_per_round = avg_num_clients * avg_selection_fraction
+        
+        # Esta é a nova lógica principal:
+        avg_time_per_round = avg_clients_per_round * avg_time_per_client_per_round
+        
+        avg_time_per_experiment = (avg_rounds * avg_time_per_round) + 60  # Adiciona 60 segundos de overhead fixo por experimento
         
         total_seconds = num_pending_experiments * avg_time_per_experiment
         hours = total_seconds / 3600
         
+        # 4. Imprimir o relatório
         print(f"⏱️  Estimativa de Tempo:")
         print(f"  - 📊 {num_pending_experiments} experimentos pendentes")
-        print(f"  - 🔄 {self.rounds} rounds por experimento")
+        print(f"  - 🔄 {int(avg_rounds)} rounds por experimento (média)")
+        print(f"  - 👥 {avg_clients_per_round:.1f} clientes por round (média)")
+        print(f"  - ⏱️  ~{avg_time_per_round:.2f} seg por round (média)")
         print(f"  - ⏱️  ~{avg_time_per_experiment/60:.1f} min por experimento (em média)")
         print(f"  - 🕐 Tempo total estimado: {hours:.1f} horas ({hours/24:.1f} dias)")
         
@@ -942,94 +662,47 @@ class ExperimentRunner:
         
         return total_seconds
     
-    def run_workflow(self):
-        """Orquestra todo o fluxo: carrega, filtra, estima, executa e salva."""
-        if not FLSimulator:
-            print("❌ FLSimulator não está disponível. Não é possível executar experimentos.")
-            return
+    # run_workflow removido: fluxo de execução unificado no main usando simulate_fl.py
 
-        self.load_existing_results()
-        
-        planned_configs = self.generate_all_configs()
-
-        print(f"{planned_configs.keys()}")  # DEBUG
-        print(f"{self.existing_exp_names}")  # DEBUG
-        
-        pending_configs = {
-            name: cfg for name, cfg in planned_configs.items()
-            if name not in self.existing_exp_names
+    def _derive_experiment_info(self, results: dict) -> dict:
+        """Deriva metadados a partir dos resultados reais, evitando inconsistências."""
+        defenses = sorted({v.get('defense') for v in results.values() if isinstance(v, dict)})
+        attack_rates = sorted({float(v.get('attack_rate', 0.0)) for v in results.values() if isinstance(v, dict)})
+        selection_fractions = sorted({float(v.get('selection_fraction', 0.0)) for v in results.values() if isinstance(v, dict)})
+        rounds_candidates = [int(v.get('rounds_total')) for v in results.values() if isinstance(v, dict) and v.get('rounds_total')]
+        rounds_val = max(rounds_candidates) if rounds_candidates else None
+        return {
+            'total_experiments': len(results),
+            'defenses': defenses,
+            'attack_rates': attack_rates,
+            'selection_fractions': selection_fractions,
+            'rounds': rounds_val,
+            'timestamp': datetime.now().isoformat()
         }
 
-        print(f"\n📊 Status da Simulação:")
-        print(f"  - {len(planned_configs)} experimentos planejados.")
-        print(f"  - {len(self.existing_exp_names)} experimentos já concluídos.")
-        print(f"  - {len(pending_configs)} experimentos pendentes para execução.")
-
-        if not pending_configs:
-            print("\n🎉 Todos os experimentos já foram concluídos!")
-        else:
-            self.estimate_time(pending_configs)
-            
-            response = input(f"\n❓ Deseja continuar com a execução dos {len(pending_configs)} experimentos pendentes? (y/N): ").lower().strip()
-            if response != 'y':
-                print("❌ Execução cancelada pelo usuário.")
-                return
-
-            print(f"\n🚀 Iniciando execução de {len(pending_configs)} experimentos...")
-            start_time = time.time()
-            
-            for i, (name, config_data) in enumerate(pending_configs.items()):
-                print(f"\n{'='*60}\n🔬 Executando {i+1}/{len(pending_configs)}: {name}\n{'='*60}")
-                
-                config_path = self.config_dir / f"{name}.yaml"
-                # Injetar flags extras antes de salvar
-                config_data['experiment']['reuse_client_model'] = getattr(self, 'reuse_client_model', False)
-                config_data['experiment']['keras_verbose'] = int(getattr(self, 'keras_verbose', 0))
-                config_data['server']['max_concurrent_clients'] = int(getattr(self, 'max_concurrent_clients', 3))
-                with open(config_path, 'w') as f:
-                    yaml.dump(config_data, f, default_flow_style=False, sort_keys=False)
-                
-                try:
-                    simulator = FLSimulator(str(config_path), use_threads=False)
-                    simulator.run_simulation()
-
-                    output_exp_dir = self.results_dir / name
-                    malicious_file_path = output_exp_dir / 'malicious_clients.json'
-                    with open(malicious_file_path, 'w') as f:
-                        json.dump({'malicious_clients': simulator.malicious_indices}, f, indent=2)
-                    print(f"💾 Índices de clientes maliciosos salvos em {malicious_file_path}")
-
-                    print(f"✅ Sucesso: {name}")
-                except Exception as e:
-                    print(f"❌ ERRO em {name}: {e}")
-            
-            total_time = time.time() - start_time
-            print(f"\n🎉 Execução dos pendentes concluída em {total_time/60:.2f} minutos.")
-
-        self.save_results_summary()
-
-    def save_results_summary(self):
-        """Cria ou atualiza o arquivo de resumo JSON com todos os resultados."""
+    def save_results_summary(self, preloaded_results: dict | None = None):
+        """Cria ou atualiza o arquivo de resumo JSON com todos os resultados.
+        Se preloaded_results for fornecido, evita uma nova varredura do disco.
+        """
         print("\n💾 Salvando resumo final dos resultados...")
-        analyzer = ResultAnalyzer(self.base_dir)
-        analyzer.load_results() # Sempre varre para garantir que tem tudo
 
-        if not analyzer.all_results:
+        if preloaded_results is not None:
+            results = preloaded_results
+        else:
+            analyzer = ResultAnalyzer(self.base_dir)
+            analyzer.load_results()
+            results = analyzer.all_results
+
+        if not results:
             print("⚠️ Nenhum resultado encontrado para criar o resumo.")
             return
 
+        experiment_info = self._derive_experiment_info(results)
         summary_data = {
-            'experiment_info': {
-                'total_experiments': len(analyzer.all_results),
-                'defenses': list(self.defense_pipelines.keys()),
-                'attack_rates': self.attack_rates,
-                'selection_fractions': self.selection_fractions,
-                'rounds': self.rounds,
-                'timestamp': datetime.now().isoformat()
-            },
-            'results': analyzer.all_results
+            'experiment_info': experiment_info,
+            'results': results
         }
-        
+
         summary_path = self.results_dir / 'complete_results.json'
         with open(summary_path, 'w') as f:
             json.dump(summary_data, f, indent=2, default=str)
@@ -1078,6 +751,12 @@ def main():
         action='store_true',
         help='Usar multi-threading dentro de cada simulação (repasse para simulate_fl.py).'
     )
+    parser.add_argument(
+        '--tf-threads',
+        type=int,
+        default=None,
+        help='Override do número de threads internos do TensorFlow por simulação (repasse para simulate_fl.py).'
+    )
     args = parser.parse_args()
 
     if args.analyze_dir:
@@ -1085,11 +764,25 @@ def main():
         analyzer = ResultAnalyzer(args.analyze_dir)
         analyzer.run_full_analysis()
     else:
+        # Verificação antecipada do simulador para evitar falhas tardias
+        try:
+            from fl_simulator import FLSimulator
+            if FLSimulator is None:
+                raise ImportError("FLSimulator é None")
+        except Exception:
+            print("❌ ERRO: Não foi possível importar FLSimulator.")
+            print("   O modo de execução (--run) e retomada (--resume_dir) não funcionarão.")
+            print("   Verifique sua instalação e o PYTHONPATH.")
+            sys.exit(1)
+
         print("--- MODO DE EXECUÇÃO ATIVADO ---")
         # Se resume_dir for fornecido, ele continua. Se for --run, resume_dir é None e inicia uma nova.
         runner = ExperimentRunner(resume_dir=args.resume_dir)
 
         # Se um arquivo de suite for fornecido, sobrepõe as opções do runner
+        # Agora permitido tanto em novas execuções quanto em retomadas: em retomadas,
+        # as opções do suite serão usadas para GERAR NOVOS arquivos de config a serem
+        # adicionados ao diretório existente, sem apagar os atuais.
         if args.suite:
             with open(args.suite, 'r') as f:
                 suite_cfg = yaml.safe_load(f)
@@ -1099,7 +792,7 @@ def main():
             runner.attack_rates = suite_cfg.get('attack_rates', runner.attack_rates)
             runner.selection_fractions = suite_cfg.get('selection_fractions', runner.selection_fractions)
             runner.non_iid = suite_cfg.get('non_iid', runner.non_iid)
-            runner.dirichlet_alpha = suite_cfg.get('dirichlet_alpha', getattr(runner, 'dirichlet_alpha', None))
+            runner.dirichlet_alpha = suite_cfg.get('dirichlet_alpha', runner.dirichlet_alpha)
 
             runner.selection_strategy = suite_cfg.get('selection_strategy', runner.selection_strategy)
             runner.model_name = suite_cfg.get('model_name', runner.model_name)
@@ -1108,7 +801,7 @@ def main():
             runner.num_clients = suite_cfg.get('num_clients', runner.num_clients)
             runner.local_epochs = suite_cfg.get('local_epochs', runner.local_epochs)
             runner.batch_size = suite_cfg.get('batch_size', runner.batch_size)
-            runner.learning_rate = suite_cfg.get('learning_rate', getattr(runner, 'learning_rate', None))
+            runner.learning_rate = suite_cfg.get('learning_rate', runner.learning_rate)
             runner.seed = suite_cfg.get('seed', runner.seed)
 
             runner.save_client_models = suite_cfg.get('save_client_models', runner.save_client_models)
@@ -1117,53 +810,141 @@ def main():
             # Extras passados via experiment
             runner.reuse_client_model = suite_cfg.get('reuse_client_model', False)
             runner.keras_verbose = int(suite_cfg.get('keras_verbose', 0))
-            runner.max_concurrent_clients = suite_cfg.get('max_concurrent_clients', 3)
+            runner.max_concurrent_clients = suite_cfg.get('max_concurrent_clients', 8)
 
-        # Gera configs (pula existentes) e executa tudo em paralelo via simulate_fl.py
+        # Em retomadas, por padrão usamos os YAMLs já existentes na pasta config/ como fonte de verdade
         runner.load_existing_results()
-        planned_configs = runner.generate_all_configs()
-        pending_configs = {
-            name: cfg for name, cfg in planned_configs.items()
-            if name not in runner.existing_exp_names
+
+        # Carrega resultados completos para identificar incompletos
+        analyzer_for_pending = ResultAnalyzer(runner.base_dir)
+        analyzer_for_pending.load_results()
+        incomplete_exps = {
+            name for name, v in analyzer_for_pending.all_results.items()
+            if isinstance(v, dict) and not v.get('success', False)
         }
 
-        print(f"\n📊 Status da Simulação:")
-        print(f"  - {len(planned_configs)} experimentos planejados.")
-        print(f"  - {len(runner.existing_exp_names)} experimentos já concluídos.")
-        print(f"  - {len(pending_configs)} experimentos pendentes para execução.")
-
-        if pending_configs:
-            runner.estimate_time(pending_configs)
-
-            response = input(f"\n❓ Deseja continuar com a execução dos {len(pending_configs)} experimentos pendentes? (y/N): ").lower().strip()
-            if response == 'y':
-                # Escreve todos os YAMLs pendentes
-                for name, config_data in pending_configs.items():
+        if args.resume_dir:
+            planned_configs_files = runner.collect_configs_from_directory()
+            # Se não houver YAMLs no diretório, caímos para geração (retrocompatibilidade)
+            if not planned_configs_files:
+                print("⚠️ Nenhum YAML encontrado em config/. Gerando configurações a partir dos parâmetros do runner.")
+                planned_configs = runner.generate_all_configs()
+                # Persistir YAMLs gerados na pasta config/ para rastreabilidade
+                for name, config_data in planned_configs.items():
                     config_path = runner.config_dir / f"{name}.yaml"
-                    # Injetar flags extras de otimização na seção experiment/server
                     config_data['experiment']['reuse_client_model'] = getattr(runner, 'reuse_client_model', False)
                     config_data['experiment']['keras_verbose'] = int(getattr(runner, 'keras_verbose', 0))
                     config_data['server']['max_concurrent_clients'] = getattr(runner, 'max_concurrent_clients', 3)
                     with open(config_path, 'w') as f:
                         yaml.dump(config_data, f, default_flow_style=False, sort_keys=False)
+                planned_configs_files = runner.collect_configs_from_directory()
 
-                # Executa via simulate_fl.py com paralelismo em processos
-                simulate_path = Path(__file__).resolve().parent / 'simulate_fl.py'
-                cmd = [sys.executable, str(simulate_path), '--config', str(runner.config_dir)]
-                if args.threads:
-                    cmd.append('--threads')
-                if args.jobs and args.jobs > 1:
-                    cmd.extend(['--jobs', str(args.jobs)])
-                print(f"\n🧪 Executando: {' '.join(cmd)}")
-                subprocess.check_call(cmd)
-            else:
-                print("❌ Execução cancelada pelo usuário.")
+            # NOVO: Se um suite foi passado junto com resume_dir, gere configs baseado no suite
+            # e adicione apenas os que ainda não existem na pasta config/ atual.
+            if args.suite:
+                print("🧩 Mesclando novas configurações do suite na simulação existente...")
+                suite_planned = runner.generate_all_configs()
+                new_count = 0
+                for name, config_data in suite_planned.items():
+                    if name not in planned_configs_files:
+                        config_path = runner.config_dir / f"{name}.yaml"
+                        # Injetar flags extras de otimização na seção experiment/server
+                        config_data['experiment']['reuse_client_model'] = getattr(runner, 'reuse_client_model', False)
+                        config_data['experiment']['keras_verbose'] = int(getattr(runner, 'keras_verbose', 0))
+                        config_data['server']['max_concurrent_clients'] = getattr(runner, 'max_concurrent_clients', 3)
+                        with open(config_path, 'w') as f:
+                            yaml.dump(config_data, f, default_flow_style=False, sort_keys=False)
+                        planned_configs_files[name] = config_path
+                        new_count += 1
+                print(f"✅ {new_count} novas configs adicionadas a {runner.config_dir} a partir do suite.")
 
-        # Seja tendo ou não executado algo, gera/resume sumário e análise
-        runner.save_results_summary()
-        
-        print("\n--- INICIANDO ANÁLISE DOS RESULTADOS FINAIS ---")
+            # Calcula concluídos entre os planejados (com base nos resultados de sucesso)
+            completed_among_planned = sum(1 for name in planned_configs_files.keys() if name in runner.existing_exp_names)
+
+            # Pendentes: não concluídos com sucesso OU marcados como incompletos
+            pending_files = {
+                name: path for name, path in planned_configs_files.items()
+                if (name not in runner.existing_exp_names) or (name in incomplete_exps)
+            }
+
+            print(f"\n📊 Status da Simulação:")
+            print(f"  - {len(planned_configs_files)} configs encontrados em {runner.config_dir}.")
+            print(f"  - {completed_among_planned} já concluídos com sucesso entre os planejados.")
+            print(f"  - {len(pending_files)} pendentes para execução (inclui incompletos para reinício).")
+
+            if pending_files:
+                # Estima tempo usando apenas a quantidade de pendentes
+                runner.estimate_time({k: {} for k in pending_files.keys()})
+
+                response = input(f"\n❓ Deseja continuar com a execução dos {len(pending_files)} pendentes? (y/N): ").lower().strip()
+                if response == 'y':
+                    # Executa via simulate_fl.py apenas os arquivos pendentes (em lotes para evitar limite de linha de comando)
+                    simulate_path = Path(__file__).resolve().parent / 'simulate_fl.py'
+                    pending_list = list(pending_files.values())
+
+                    # Define tamanho do lote conservador
+                    batch_size = 64
+                    for i in range(0, len(pending_list), batch_size):
+                        batch = pending_list[i:i+batch_size]
+                        cmd = [sys.executable, str(simulate_path), '--config'] + [str(p) for p in batch]
+                        if args.threads:
+                            cmd.append('--threads')
+                        if args.tf_threads is not None:
+                            cmd.extend(['--tf-threads', str(args.tf_threads)])
+                        if args.jobs and args.jobs > 1:
+                            cmd.extend(['--jobs', str(args.jobs)])
+                        print(f"\n🧪 Executando lote {i//batch_size + 1}: {' '.join(cmd[:5])} ... (+{len(batch)} arquivos)")
+                        subprocess.check_call(cmd)
+                else:
+                    print("❌ Execução cancelada pelo usuário.")
+        else:
+            # Fluxo original para novas execuções: gerar configs a partir dos parâmetros
+            planned_configs = runner.generate_all_configs()
+            pending_configs = {
+                name: cfg for name, cfg in planned_configs.items()
+                if name not in runner.existing_exp_names
+            }
+
+            print(f"\n📊 Status da Simulação:")
+            print(f"  - {len(planned_configs)} experimentos planejados.")
+            print(f"  - {len(runner.existing_exp_names)} experimentos já concluídos.")
+            print(f"  - {len(pending_configs)} experimentos pendentes para execução.")
+
+            if pending_configs:
+                runner.estimate_time(pending_configs)
+
+                response = input(f"\n❓ Deseja continuar com a execução dos {len(pending_configs)} experimentos pendentes? (y/N): ").lower().strip()
+                if response == 'y':
+                    # Escreve todos os YAMLs pendentes
+                    for name, config_data in pending_configs.items():
+                        config_path = runner.config_dir / f"{name}.yaml"
+                        # Injetar flags extras de otimização na seção experiment/server
+                        config_data['experiment']['reuse_client_model'] = getattr(runner, 'reuse_client_model', False)
+                        config_data['experiment']['keras_verbose'] = int(getattr(runner, 'keras_verbose', 0))
+                        config_data['server']['max_concurrent_clients'] = getattr(runner, 'max_concurrent_clients', 3)
+                        with open(config_path, 'w') as f:
+                            yaml.dump(config_data, f, default_flow_style=False, sort_keys=False)
+
+                    # Executa via simulate_fl.py com paralelismo em processos
+                    simulate_path = Path(__file__).resolve().parent / 'simulate_fl.py'
+                    cmd = [sys.executable, str(simulate_path), '--config', str(runner.config_dir)]
+                    if args.threads:
+                        cmd.append('--threads')
+                    if args.tf_threads is not None:
+                        cmd.extend(['--tf-threads', str(args.tf_threads)])
+                    if args.jobs and args.jobs > 1:
+                        cmd.extend(['--jobs', str(args.jobs)])
+                    print(f"\n🧪 Executando: {' '.join(cmd)}")
+                    subprocess.check_call(cmd)
+                else:
+                    print("❌ Execução cancelada pelo usuário.")
+
+        # Seja tendo ou não executado algo, varre UMA vez e reaproveita nos passos seguintes
         analyzer = ResultAnalyzer(runner.base_dir)
+        analyzer.load_results()
+        runner.save_results_summary(preloaded_results=analyzer.all_results)
+
+        print("\n--- INICIANDO ANÁLISE DOS RESULTADOS FINAIS ---")
         analyzer.run_full_analysis()
 
 

@@ -105,23 +105,48 @@ class DatasetFactory:
         num_classes: int,
         n_clients: int,
         alpha: float,
+        rng: Optional[np.random.Generator] = None,
     ) -> List[np.ndarray]:
         """Create Dirichlet label-skew partitions returning list of index arrays per client."""
+        if rng is None:
+            rng = np.random.default_rng()
+
         data_indices = np.arange(len(labels))
         client_indices: List[List[int]] = [[] for _ in range(n_clients)]
         for k in range(num_classes):
             idx_k = data_indices[labels[data_indices] == k]
-            np.random.shuffle(idx_k)
+            # Shuffle class-specific indices deterministically via provided rng
+            rng.shuffle(idx_k)
             # sample proportions and split
-            proportions = np.random.dirichlet(np.repeat(alpha, n_clients))
+            proportions = rng.dirichlet(np.repeat(alpha, n_clients))
             split_points = (np.cumsum(proportions) * len(idx_k)).astype(int)[:-1]
             splits = np.split(idx_k, split_points)
             for i in range(n_clients):
                 client_indices[i].extend(splits[i].tolist())
         # shuffle within client
         for i in range(n_clients):
-            np.random.shuffle(client_indices[i])
+            rng.shuffle(client_indices[i])
         return [np.array(ci, dtype=np.int64) for ci in client_indices]
+
+    @staticmethod
+    def _make_rng_for_partition(
+        seed: Optional[int],
+        dataset_tag: str,
+        n_clients: int,
+        non_iid: bool,
+        alpha: Optional[float],
+        split_tag: str = "both",
+    ) -> np.random.Generator:
+        """
+        Build a dedicated RNG seeded deterministically from the logical partition key.
+        Avoids interference from global RNG state and remains stable across processes.
+        """
+        import hashlib
+        key = f"{dataset_tag}|{seed}|{n_clients}|{int(non_iid)}|{alpha if alpha is not None else 'none'}|{split_tag}"
+        digest = hashlib.sha256(key.encode('utf-8')).digest()
+        # Use first 8 bytes to construct a 64-bit seed, reduce to uint32 range supported by PCG64
+        seed_int = int.from_bytes(digest[:8], 'little') % (2**32 - 1)
+        return np.random.default_rng(seed_int)
 
     def _export_distribution_and_plot(
         self,
@@ -229,8 +254,11 @@ class DatasetFactory:
             # create indices per client
             if non_iid:
                 alpha = dirichlet_alpha if dirichlet_alpha is not None else 0.5
-                train_idx = self._dirichlet_partition_indices(y_train_int, num_classes, num_clients, alpha)
-                test_idx = self._dirichlet_partition_indices(y_test_int, num_classes, num_clients, alpha)
+                # Use deterministic RNGs derived from the logical partition key
+                rng_train = self._make_rng_for_partition(seed, 'MNIST', num_clients, True, alpha, split_tag='train')
+                rng_test = self._make_rng_for_partition(seed, 'MNIST', num_clients, True, alpha, split_tag='test')
+                train_idx = self._dirichlet_partition_indices(y_train_int, num_classes, num_clients, alpha, rng=rng_train)
+                test_idx = self._dirichlet_partition_indices(y_test_int, num_classes, num_clients, alpha, rng=rng_test)
             else:
                 # IID: split contiguous blocks
                 total_train = len(x_train_all)
@@ -270,8 +298,8 @@ class DatasetFactory:
             }
             self._CACHE['MNIST']['partitions'][part_key] = parts
 
-        # Export CSV/plot once
-        if export_distribution and not parts.get('exported', False):
+        # Export CSV/plot once per partition, only if we have a valid target directory
+        if export_distribution and not parts.get('exported', False) and experiment_dir is not None:
             try:
                 self._export_distribution_and_plot(
                     experiment_dir=experiment_dir,
@@ -338,8 +366,10 @@ class DatasetFactory:
         x_images = x_images[indices]
         y_labels = y_labels[indices]
 
+        # Deterministic split based on provided seed
+        rs = seed if seed is not None else 42
         x_train, x_test, y_train, y_test = train_test_split(
-            x_images, y_labels, test_size=0.3, random_state=42, shuffle=True
+            x_images, y_labels, test_size=0.3, random_state=rs, shuffle=True
         )
 
         y_train = tf.keras.utils.to_categorical(y_train, num_categories)

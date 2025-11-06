@@ -75,14 +75,17 @@ class FLSimulator:
         # Configura o arquivo de log
         log_file = os.path.join(self.logs_dir, 'simulator.log')
         
-        # Configura o logger raiz
-        logging.basicConfig(
-            level=getattr(logging, log_level),
-            format='%(asctime)s - %(name)s - %(levelname)s - %(message)s'
-        )
-        
-        # Cria o logger para este componente
+        # Cria o logger dedicado
         self.logger = logging.getLogger("FLSimulator")
+        self.logger.setLevel(getattr(logging, log_level))
+        self.logger.propagate = False
+        # Limpa handlers antigos para evitar sobreposição entre execuções
+        for h in list(self.logger.handlers):
+            try:
+                self.logger.removeHandler(h)
+                h.close()
+            except Exception:
+                pass
         
         # Cria manipulador de arquivo
         file_handler = logging.FileHandler(log_file)
@@ -151,6 +154,21 @@ class FLSimulator:
                 client_model_dir = os.path.join(self.client_models_dir, f'client_{client_id}')
                 os.makedirs(client_model_dir, exist_ok=True)
         
+        # Lista de clientes com dados disponíveis (evita selecionar clientes vazios)
+        try:
+            self.nonempty_client_ids = [cid for cid, c in clients.items() if getattr(c, 'num_examples', 0) > 0]
+            empty_ids = sorted([cid for cid, c in clients.items() if getattr(c, 'num_examples', 0) <= 0])
+            self.logger.info(
+                f"Distribuição de dados por cliente: {len(self.nonempty_client_ids)} com dados, {len(empty_ids)} sem dados"
+            )
+            if empty_ids:
+                self.logger.warning(
+                    f"Clientes sem dados (excluídos da seleção): {empty_ids[:10]}{'...' if len(empty_ids) > 10 else ''}"
+                )
+        except Exception:
+            # Em caso de qualquer problema, caímos no comportamento padrão (todos disponíveis)
+            self.nonempty_client_ids = list(clients.keys())
+        
         return clients
     
     def _train_client(self, client: BaseFLClient, global_weights: List[np.ndarray]) -> Tuple[List[np.ndarray], int, float, float]:
@@ -179,7 +197,9 @@ class FLSimulator:
         Args:
             round_num: Current round number
         """              
-        self.server.start_round()
+        # Selecionar clientes considerando apenas aqueles com dados
+        available_clients = getattr(self, 'nonempty_client_ids', None)
+        self.server.start_round(available_clients=available_clients)
 
         # Get current global weights
         global_weights = self.server.model.get_weights()
@@ -191,29 +211,49 @@ class FLSimulator:
             self.logger.info("Usando multi-threading para treinamento de clientes")
 
             # Multi-threaded training
-            threads = []
             thread_results = {}
+            failed_clients = []
             
             # Create a lock for thread safety
             lock = threading.Lock()
             
             def train_client_thread(client_id):
-                client = self.clients[client_id]
-                weights, num_examples, loss, accuracy = self._train_client(client, global_weights)
+                    try:
+                        client = self.clients[client_id]
+                        weights, num_examples, loss, accuracy = self._train_client(client, global_weights)
 
-                # Thread-safe update of results
-                with lock:
-                    thread_results[client_id] = (weights, num_examples, loss, accuracy)
+                        # Thread-safe update of results
+                        with lock:
+                            thread_results[client_id] = (weights, num_examples, loss, accuracy)
+                    except Exception as e:
+                        # Capture per-client failures without crashing the round
+                        with lock:
+                            failed_clients.append(client_id)
+                        self.logger.error(f"Falha ao treinar cliente {client_id} na rodada {self.server.current_round}: {e}")
             
-            # Start a thread for each selected client
-            for client_id in selected_client_ids:
-                thread = threading.Thread(target=train_client_thread, args=(client_id,))
-                thread.start()
-                threads.append(thread)
-            
-            # Wait for all threads to complete
-            for thread in threads:
-                thread.join()
+            # Limit concurrency using server's max_concurrent_clients (batch threads)
+            max_workers = getattr(self.server, 'max_concurrent_clients', 8) or 8
+            if max_workers < 1:
+                max_workers = 8
+
+            # Launch threads in batches to reduce memory pressure
+            for i in range(0, len(selected_client_ids), max_workers):
+                batch = selected_client_ids[i:i+max_workers]
+                threads = []
+                for client_id in batch:
+                    thread = threading.Thread(target=train_client_thread, args=(client_id,))
+                    thread.start()
+                    threads.append(thread)
+                for thread in threads:
+                    thread.join()
+
+            # Adjust selected clients to only include successful ones (sorted for determinism)
+            successful_client_ids = sorted(thread_results.keys())
+            if failed_clients:
+                self.logger.warning(
+                    f"{len(failed_clients)} clientes falharam nesta rodada {self.server.current_round} e serão excluídos da agregação: {sorted(failed_clients)[:10]}{'...' if len(failed_clients) > 10 else ''}"
+                )
+            self.server.selected_clients = successful_client_ids
             
             # Collect results from threads and register in server
             for client_id, (weights, num_examples, local_loss, local_accuracy) in thread_results.items():
@@ -312,5 +352,27 @@ class FLSimulator:
         total_rounds = self.experiment_config['rounds']
         for round_num in range(1, total_rounds + 1):
             self.simulate_round(round_num)
+            # After each round, compute simple ETA based on observed round durations
+            try:
+                round_times = self.server.metrics.get('round_time', [])
+                completed = len(round_times)
+                if completed > 0:
+                    avg = float(np.mean(round_times))
+                    remaining = max(0, total_rounds - completed)
+                    eta_seconds = remaining * avg
+                    # Format ETA into h m s
+                    hrs = int(eta_seconds // 3600)
+                    mins = int((eta_seconds % 3600) // 60)
+                    secs = int(eta_seconds % 60)
+                    msg = (
+                        f"Progresso do experimento: rodada {completed}/{total_rounds} | "
+                        f"média {avg:.2f}s/rodada | ETA ~ {hrs}h {mins}m {secs}s"
+                    )
+                    # Log em arquivo e também imprimir para o terminal
+                    self.logger.info(msg)
+                    print(msg)
+            except Exception:
+                # Não deixar ETA quebrar a simulação
+                pass
                 
         return self.server.metrics
