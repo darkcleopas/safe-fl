@@ -4,7 +4,6 @@ import os
 import logging
 import gc
 import time
-import math
 import multiprocessing as mp
 from concurrent.futures import ProcessPoolExecutor, as_completed
 
@@ -86,7 +85,7 @@ def main():
 
     show_progress = not args.no_progress
     total = len(config_files)
-    if args.jobs and args.jobs > 1 and total > 1:
+    if args.jobs and args.jobs >= 1 and total > 1:
         # Run in parallel processes
         # Use 'spawn' context to avoid forking TensorFlow state, which is safer and prevents crashes
         ctx = mp.get_context("spawn")
@@ -94,7 +93,6 @@ def main():
         with ProcessPoolExecutor(max_workers=args.jobs, mp_context=ctx) as executor:
             futures = [executor.submit(_run_single_config, cf, args.threads, tf_threads) for cf in config_files]
             done = 0
-            durations = []
             for fut in as_completed(futures):
                 try:
                     done_cfg = fut.result()
@@ -117,7 +115,6 @@ def main():
         # Sequential fallback
         start = time.time()
         for i, config_file in enumerate(config_files, start=1):
-            cfg_start = time.time()
             _run_single_config(config_file, args.threads, tf_threads)
             print(f"Finished simulation for config: {config_file}")
             if show_progress:

@@ -1,9 +1,13 @@
 #!/usr/bin/env python3
 """
 Script completo para comparação de defesas em Federated Learning.
-Este script foi refatorado para separar a execução da análise.
-- ExperimentRunner: Lida com a geração de configurações e execução de simulações.
-- ResultAnalyzer: Lida com o carregamento e análise de resultados.
+Refatorado para separar Preparação, Execução e Análise.
+
+- Modo Preparação (--run, --resume_dir): Gera/valida configs YAML e cria 
+  scripts de shell (run_job_N.sh) para os executores.
+- Modo Análise (--analyze_dir): Carrega resultados, processa e gera CSVs.
+
+A execução em si é delegada aos scripts de job, que chamam simulate_fl.py.
 """
 
 import sys
@@ -18,13 +22,13 @@ import numpy as np
 import argparse
 import re
 import ast
-
+import os  # Adicionado para chmod
 
 # Adicionar diretório raiz ao path, se necessário
 # (Assumindo que fl_simulator está no mesmo diretório ou no PYTHONPATH)
 # sys.path.append(os.path.dirname(os.path.abspath(__file__)))
 
-# A verificação de import do simulador foi movida para dentro do main (modo execução)
+# A verificação de import do simulador foi movida para dentro do main (modo preparação)
 
 
 def slugify(text):
@@ -165,12 +169,60 @@ class ResultAnalyzer:
                 return
 
         if self.all_results:
-            # NOVO: Instancia o processador para gerar DataFrame e gráficos
+            # Salva o resumo JSON consolidado
+            self.save_results_summary(preloaded_results=self.all_results)
+            
+            # Instancia o processador para gerar DataFrame e gráficos
             processor = ResultProcessor(self.all_results, self.results_dir)
             processor.generate_and_save_dataframe()
             processor.generate_final_metrics_summary()
         else:
             print("Análise interrompida.")
+
+    def _derive_experiment_info(self, results: dict) -> dict:
+        """Deriva metadados a partir dos resultados reais, evitando inconsistências."""
+        defenses = sorted({v.get('defense') for v in results.values() if isinstance(v, dict)})
+        attack_rates = sorted({float(v.get('attack_rate', 0.0)) for v in results.values() if isinstance(v, dict)})
+        selection_fractions = sorted({float(v.get('selection_fraction', 0.0)) for v in results.values() if isinstance(v, dict)})
+        rounds_candidates = [int(v.get('rounds_total')) for v in results.values() if isinstance(v, dict) and v.get('rounds_total')]
+        rounds_val = max(rounds_candidates) if rounds_candidates else None
+        return {
+            'total_experiments': len(results),
+            'defenses': defenses,
+            'attack_rates': attack_rates,
+            'selection_fractions': selection_fractions,
+            'rounds': rounds_val,
+            'timestamp': datetime.now().isoformat()
+        }
+
+    def save_results_summary(self, preloaded_results: dict | None = None):
+        """Cria ou atualiza o arquivo de resumo JSON com todos os resultados.
+        Se preloaded_results for fornecido, evita uma nova varredura do disco.
+        """
+        print("\n💾 Salvando resumo final dos resultados...")
+
+        if preloaded_results is not None:
+            results = preloaded_results
+        else:
+            # Se não pré-carregado, carrega agora
+            if not self.all_results:
+                self.load_results()
+            results = self.all_results
+
+        if not results:
+            print("⚠️ Nenhum resultado encontrado para criar o resumo.")
+            return
+
+        experiment_info = self._derive_experiment_info(results)
+        summary_data = {
+            'experiment_info': experiment_info,
+            'results': results
+        }
+
+        summary_path = self.results_dir / 'complete_results.json'
+        with open(summary_path, 'w') as f:
+            json.dump(summary_data, f, indent=2, default=str)
+        print(f"📄 Resumo atualizado salvo em: {summary_path}")
 
 
 class ResultProcessor:
@@ -432,7 +484,7 @@ class ResultProcessor:
 
 class ExperimentRunner:
     """
-    Classe para gerar configurações e executar a simulação de experimentos.
+    Classe para gerar configurações e preparar a simulação de experimentos.
     """
     def __init__(self, resume_dir=None):
         self.defense_pipelines = {
@@ -486,14 +538,18 @@ class ExperimentRunner:
             print("✅ Nenhum resultado existente encontrado.")
             return
 
-        analyzer = ResultAnalyzer(self.base_dir)
-        if analyzer.load_results():
-            # Considera apenas experimentos marcados como sucesso
-            self.existing_exp_names = {
-                name for name, v in analyzer.all_results.items()
-                if isinstance(v, dict) and v.get('success', False)
-            }
-        print(f"✅ Encontrados {len(self.existing_exp_names)} resultados existentes.")
+        # Usa o analisador apenas para carregar os dados, sem processar
+        try:
+            analyzer = ResultAnalyzer(self.base_dir)
+            if analyzer.load_results():
+                # Considera apenas experimentos marcados como sucesso
+                self.existing_exp_names = {
+                    name for name, v in analyzer.all_results.items()
+                    if isinstance(v, dict) and v.get('success', False)
+                }
+            print(f"✅ Encontrados {len(self.existing_exp_names)} resultados existentes.")
+        except FileNotFoundError:
+            print("✅ Nenhum resultado existente encontrado (diretório 'results' não existe).")
 
     def collect_configs_from_directory(self):
         """Coleta todos os arquivos YAML em self.config_dir como fonte de verdade em retomadas.
@@ -617,10 +673,11 @@ class ExperimentRunner:
         DEFAULT_TIME = 6.0     # Tempo padrão se o modelo não for encontrado
 
         # 1. Calcular o tempo médio por cliente, com base nos modelos nos configs
+        # (Se configs for apenas uma lista de nomes, usar os defaults do runner)
+        model_types_in_suite = ensure_list(self.model_name)
         model_times_per_client = []
-        for cfg in configs.values():
-            model_type = cfg.get('model', {}).get('type')
-            # Obter o tempo base (para 100 clientes) ou usar o padrão
+        for model_type in model_types_in_suite:
+             # Obter o tempo base (para 100 clientes) ou usar o padrão
             time_base_100_clients = model_time_estimates_per_round.get(model_type, DEFAULT_TIME)
             # Calcular o tempo por cliente individual
             time_per_client = time_base_100_clients / N_BASE_CLIENTS
@@ -662,127 +719,191 @@ class ExperimentRunner:
         
         return total_seconds
     
-    # run_workflow removido: fluxo de execução unificado no main usando simulate_fl.py
+    # run_workflow removido: fluxo de execução agora é externo
+    # save_results_summary removido: movido para ResultAnalyzer
 
-    def _derive_experiment_info(self, results: dict) -> dict:
-        """Deriva metadados a partir dos resultados reais, evitando inconsistências."""
-        defenses = sorted({v.get('defense') for v in results.values() if isinstance(v, dict)})
-        attack_rates = sorted({float(v.get('attack_rate', 0.0)) for v in results.values() if isinstance(v, dict)})
-        selection_fractions = sorted({float(v.get('selection_fraction', 0.0)) for v in results.values() if isinstance(v, dict)})
-        rounds_candidates = [int(v.get('rounds_total')) for v in results.values() if isinstance(v, dict) and v.get('rounds_total')]
-        rounds_val = max(rounds_candidates) if rounds_candidates else None
-        return {
-            'total_experiments': len(results),
-            'defenses': defenses,
-            'attack_rates': attack_rates,
-            'selection_fractions': selection_fractions,
-            'rounds': rounds_val,
-            'timestamp': datetime.now().isoformat()
-        }
 
-    def save_results_summary(self, preloaded_results: dict | None = None):
-        """Cria ou atualiza o arquivo de resumo JSON com todos os resultados.
-        Se preloaded_results for fornecido, evita uma nova varredura do disco.
-        """
-        print("\n💾 Salvando resumo final dos resultados...")
+# --- INÍCIO DAS FUNÇÕES AUXILIARES DE PREPARAÇÃO ---
 
-        if preloaded_results is not None:
-            results = preloaded_results
-        else:
-            analyzer = ResultAnalyzer(self.base_dir)
-            analyzer.load_results()
-            results = analyzer.all_results
+def generate_job_scripts(runner: ExperimentRunner, pending_list: list, jobs: int, sim_jobs: int, tf_threads: int | None):
+    """
+    Divide os configs pendentes em scripts de shell para execução paralela.
+    """
+    if not pending_list:
+        print("✅ Nenhum experimento pendente encontrado. Nada a fazer.")
+        return
 
-        if not results:
-            print("⚠️ Nenhum resultado encontrado para criar o resumo.")
-            return
+    # Caminho para o script executor
+    simulate_path = Path(__file__).resolve().parent / 'simulate_fl.py'
+    if not simulate_path.exists():
+        print(f"❌ ERRO: 'simulate_fl.py' não encontrado em {simulate_path.parent}")
+        return
 
-        experiment_info = self._derive_experiment_info(results)
-        summary_data = {
-            'experiment_info': experiment_info,
-            'results': results
-        }
+    # Divide a lista de arquivos de config pendentes em 'jobs' lotes
+    job_batches = np.array_split(pending_list, jobs)
+    
+    print(f"⚖️  Dividindo {len(pending_list)} configs em {len(job_batches)} jobs...")
 
-        summary_path = self.results_dir / 'complete_results.json'
-        with open(summary_path, 'w') as f:
-            json.dump(summary_data, f, indent=2, default=str)
-        print(f"📄 Resumo atualizado salvo em: {summary_path}")
+    for i, batch in enumerate(job_batches):
+        if len(batch) == 0:
+            continue # Evita criar jobs vazios se jobs > pending_list
+            
+        job_num = i + 1
+        script_name = f"run_job_{job_num}.sh"
+        script_path = runner.base_dir / script_name
+
+        with open(script_path, 'w') as f:
+            f.write("#!/bin/bash\n")
+            f.write(f"echo '--- ⏳ Iniciando Job {job_num}/{jobs} -- (Processando {len(batch)} configs) ---'\n")
+            
+            # Constrói o comando
+            cmd_parts = [
+                sys.executable, 
+                str(simulate_path), 
+                '--config'
+            ] + [str(p.relative_to(runner.base_dir)) for p in batch] # Usa caminhos relativos ao base_dir
+            
+            if tf_threads is not None:
+                cmd_parts.extend(['--tf-threads', str(tf_threads)])
+            else:
+                # Default conservador se não for passado
+                cmd_parts.extend(['--tf-threads', '1'])
+                
+            # PASSE OS JOBS INTERNOS PARA O SIMULATE_FL.PY
+            cmd_parts.extend(['--jobs', str(sim_jobs)])
+            
+            # Adiciona --jobs 1 ao simulate_fl.py para garantir que ele rode sequencialmente *dentro* do job
+            # (O paralelismo de jobs é gerenciado pelos terminais)
+            # NOTA: Se simulate_fl.py --jobs > 1 for desejado *dentro* de um worker, ajuste aqui.
+            # Por padrão, vamos manter 1 para logs mais limpos por worker.
+            # cmd_parts.extend(['--jobs', '1']) 
+
+            f.write(" ".join(cmd_parts) + "\n")
+            f.write(f"echo '\n--- ✅ Job {job_num}/{jobs} Concluído ---'\n")
+            f.write("read -p 'Pressione Enter para fechar este terminal...'\n")
+        
+        # Torna o script executável
+        os.chmod(script_path, 0o755)
+        print(f"  -> 📜 Script '{script_name}' criado com {len(batch)} configs.")
+
+def print_job_instructions(base_dir: Path, jobs: int):
+    """
+    Imprime as instruções finais para o usuário executar os scripts de job.
+    """
+    print("\n" + "="*60)
+    print("✅ PREPARAÇÃO CONCLUÍDA ✅")
+    print("="*60)
+    print(f"Simulação pronta em: {base_dir.resolve()}")
+    print(f"Foram criados {jobs} scripts de job para execução.")
+    print("\n➡️  Próximos passos:\n")
+    print(f"1. Abra {jobs} novos terminais.")
+    print(f"2. Em cada terminal, navegue até o diretório e execute um dos scripts:")
+    
+    # Mostra comandos fáceis de copiar e colar
+    base_dir_str = str(base_dir.resolve())
+    for i in range(1, jobs + 1):
+        print(f"\n   --- Terminal {i} ---")
+        print(f"   cd \"{base_dir_str}\"")
+        print(f"   ./run_job_{i}.sh")
+
+    print(f"\n3. Quando TODOS os jobs terminarem (e você pressionar Enter neles):")
+    print(f"4. Volte para este terminal e rode a análise final:")
+    
+    # Constrói o comando de análise
+    analyze_cmd = f"python3 \"{Path(__file__).resolve()}\" --analyze_dir \"{base_dir_str}\""
+    print(f"\n   {analyze_cmd}\n")
+    print("="*60 + "\n")
+
+
+# --- FIM DAS FUNÇÕES AUXILIARES ---
 
 
 def main():
     parser = argparse.ArgumentParser(
-        description="Script para executar e/ou analisar experimentos de defesas em FL.",
+        description="Script para PREPARAR e ANALISAR experimentos de defesas em FL.",
         formatter_class=argparse.RawTextHelpFormatter
     )
     group = parser.add_mutually_exclusive_group(required=True)
     group.add_argument(
         '--run',
         action='store_true',
-        help='Modo Execução: Inicia uma nova simulação do zero.'
+        help='Modo Preparação: Prepara uma *nova* simulação (gera configs e scripts de job).'
     )
     group.add_argument(
         '--analyze_dir',
         type=str,
         metavar='PATH',
-        help='Modo Análise: Caminho para uma simulação para rodar apenas a análise.\n'
+        help='Modo Análise: Analisa resultados de uma simulação *concluída*.\n'
              'Exemplo: --analyze_dir simulation_20250912_011458'
     )
     group.add_argument(
         '--resume_dir',
         type=str,
         metavar='PATH',
-        help='Modo Execução (Retomar): Caminho para uma simulação para continuar a execução.\n'
+        help='Modo Preparação (Retomar): Prepara a *retomada* de uma simulação.\n'
              'Exemplo: --resume_dir simulation_20250912_011458'
     )
     parser.add_argument(
         '--suite',
         type=str,
         metavar='PATH',
-        help='Arquivo YAML mestre descrevendo todos os experimentos (variações e defesas).'
+        help='(Preparação) Arquivo YAML mestre descrevendo todos os experimentos.'
     )
     parser.add_argument(
         '--jobs',
         type=int,
         default=1,
-        help='Número de processos em paralelo para executar os experimentos (repasse para simulate_fl.py).'
+        help='(Preparação) Número de scripts de job paralelos para gerar.'
     )
     parser.add_argument(
         '--threads',
         action='store_true',
-        help='Usar multi-threading dentro de cada simulação (repasse para simulate_fl.py).'
+        help='(Preparação) Passa a flag --threads para simulate_fl.py (paralelismo *dentro* da simulação).'
     )
     parser.add_argument(
         '--tf-threads',
         type=int,
         default=None,
-        help='Override do número de threads internos do TensorFlow por simulação (repasse para simulate_fl.py).'
+        help='(Preparação) Passa a flag --tf-threads para simulate_fl.py (override de threads do TF).'
     )
     args = parser.parse_args()
 
+    # --- MODO DE ANÁLISE ---
     if args.analyze_dir:
-        print("--- MODO DE ANÁLISE ATIVADO ---")
-        analyzer = ResultAnalyzer(args.analyze_dir)
-        analyzer.run_full_analysis()
+        print("--- 📊 MODO DE ANÁLISE ATIVADO ---")
+        try:
+            analyzer = ResultAnalyzer(args.analyze_dir)
+            analyzer.run_full_analysis()
+            print(f"\n✅ Análise concluída com sucesso para: {args.analyze_dir}")
+        except FileNotFoundError as e:
+            print(f"❌ Erro: {e}")
+        except Exception as e:
+            print(f"❌ Erro inesperado durante a análise: {e}")
+            
+    # --- MODO DE PREPARAÇÃO (NOVO OU RETOMADA) ---
     else:
-        # Verificação antecipada do simulador para evitar falhas tardias
+        # Verificação antecipada do simulador
         try:
             from fl_simulator import FLSimulator
             if FLSimulator is None:
                 raise ImportError("FLSimulator é None")
         except Exception:
             print("❌ ERRO: Não foi possível importar FLSimulator.")
-            print("   O modo de execução (--run) e retomada (--resume_dir) não funcionarão.")
+            print("   O modo de preparação (--run) e retomada (--resume_dir) não funcionarão.")
             print("   Verifique sua instalação e o PYTHONPATH.")
             sys.exit(1)
 
-        print("--- MODO DE EXECUÇÃO ATIVADO ---")
+        print("--- 🛠️  MODO DE PREPARAÇÃO ATIVADO ---")
+        
+        # '--run' precisa de uma suite
+        if args.run and not args.suite:
+            print("❌ Erro: O modo --run requer um arquivo --suite.")
+            sys.exit(1)
+
         # Se resume_dir for fornecido, ele continua. Se for --run, resume_dir é None e inicia uma nova.
         runner = ExperimentRunner(resume_dir=args.resume_dir)
 
         # Se um arquivo de suite for fornecido, sobrepõe as opções do runner
-        # Agora permitido tanto em novas execuções quanto em retomadas: em retomadas,
-        # as opções do suite serão usadas para GERAR NOVOS arquivos de config a serem
-        # adicionados ao diretório existente, sem apagar os atuais.
         if args.suite:
             with open(args.suite, 'r') as f:
                 suite_cfg = yaml.safe_load(f)
@@ -812,24 +933,18 @@ def main():
             runner.keras_verbose = int(suite_cfg.get('keras_verbose', 0))
             runner.max_concurrent_clients = suite_cfg.get('max_concurrent_clients', 8)
 
-        # Em retomadas, por padrão usamos os YAMLs já existentes na pasta config/ como fonte de verdade
+        # 1. Carregar o que já foi feito
         runner.load_existing_results()
 
-        # Carrega resultados completos para identificar incompletos
-        analyzer_for_pending = ResultAnalyzer(runner.base_dir)
-        analyzer_for_pending.load_results()
-        incomplete_exps = {
-            name for name, v in analyzer_for_pending.all_results.items()
-            if isinstance(v, dict) and not v.get('success', False)
-        }
-
+        # 2. Carregar o que *deveria* ser feito (do disco ou da suite)
+        
+        # Em retomadas, por padrão usamos os YAMLs já existentes na pasta config/
         if args.resume_dir:
             planned_configs_files = runner.collect_configs_from_directory()
-            # Se não houver YAMLs no diretório, caímos para geração (retrocompatibilidade)
             if not planned_configs_files:
                 print("⚠️ Nenhum YAML encontrado em config/. Gerando configurações a partir dos parâmetros do runner.")
+                # ... (lógica de geração e persistência de configs) ...
                 planned_configs = runner.generate_all_configs()
-                # Persistir YAMLs gerados na pasta config/ para rastreabilidade
                 for name, config_data in planned_configs.items():
                     config_path = runner.config_dir / f"{name}.yaml"
                     config_data['experiment']['reuse_client_model'] = getattr(runner, 'reuse_client_model', False)
@@ -839,8 +954,7 @@ def main():
                         yaml.dump(config_data, f, default_flow_style=False, sort_keys=False)
                 planned_configs_files = runner.collect_configs_from_directory()
 
-            # NOVO: Se um suite foi passado junto com resume_dir, gere configs baseado no suite
-            # e adicione apenas os que ainda não existem na pasta config/ atual.
+            # Se um suite foi passado junto com resume_dir, mescla
             if args.suite:
                 print("🧩 Mesclando novas configurações do suite na simulação existente...")
                 suite_planned = runner.generate_all_configs()
@@ -848,7 +962,7 @@ def main():
                 for name, config_data in suite_planned.items():
                     if name not in planned_configs_files:
                         config_path = runner.config_dir / f"{name}.yaml"
-                        # Injetar flags extras de otimização na seção experiment/server
+                        # Injetar flags extras
                         config_data['experiment']['reuse_client_model'] = getattr(runner, 'reuse_client_model', False)
                         config_data['experiment']['keras_verbose'] = int(getattr(runner, 'keras_verbose', 0))
                         config_data['server']['max_concurrent_clients'] = getattr(runner, 'max_concurrent_clients', 3)
@@ -858,6 +972,14 @@ def main():
                         new_count += 1
                 print(f"✅ {new_count} novas configs adicionadas a {runner.config_dir} a partir do suite.")
 
+            # Carrega resultados completos para identificar incompletos
+            analyzer_for_pending = ResultAnalyzer(runner.base_dir)
+            analyzer_for_pending.load_results()
+            incomplete_exps = {
+                name for name, v in analyzer_for_pending.all_results.items()
+                if isinstance(v, dict) and not v.get('success', False)
+            }
+
             # Calcula concluídos entre os planejados (com base nos resultados de sucesso)
             completed_among_planned = sum(1 for name in planned_configs_files.keys() if name in runner.existing_exp_names)
 
@@ -866,86 +988,74 @@ def main():
                 name: path for name, path in planned_configs_files.items()
                 if (name not in runner.existing_exp_names) or (name in incomplete_exps)
             }
+            pending_list = list(pending_files.values())
 
-            print(f"\n📊 Status da Simulação:")
+            print(f"\n📊 Status da Simulação (Retomada):")
             print(f"  - {len(planned_configs_files)} configs encontrados em {runner.config_dir}.")
             print(f"  - {completed_among_planned} já concluídos com sucesso entre os planejados.")
             print(f"  - {len(pending_files)} pendentes para execução (inclui incompletos para reinício).")
 
-            if pending_files:
-                # Estima tempo usando apenas a quantidade de pendentes
-                runner.estimate_time({k: {} for k in pending_files.keys()})
-
-                response = input(f"\n❓ Deseja continuar com a execução dos {len(pending_files)} pendentes? (y/N): ").lower().strip()
-                if response == 'y':
-                    # Executa via simulate_fl.py apenas os arquivos pendentes (em lotes para evitar limite de linha de comando)
-                    simulate_path = Path(__file__).resolve().parent / 'simulate_fl.py'
-                    pending_list = list(pending_files.values())
-
-                    # Define tamanho do lote conservador
-                    batch_size = 64
-                    for i in range(0, len(pending_list), batch_size):
-                        batch = pending_list[i:i+batch_size]
-                        cmd = [sys.executable, str(simulate_path), '--config'] + [str(p) for p in batch]
-                        if args.threads:
-                            cmd.append('--threads')
-                        if args.tf_threads is not None:
-                            cmd.extend(['--tf-threads', str(args.tf_threads)])
-                        if args.jobs and args.jobs > 1:
-                            cmd.extend(['--jobs', str(args.jobs)])
-                        print(f"\n🧪 Executando lote {i//batch_size + 1}: {' '.join(cmd[:5])} ... (+{len(batch)} arquivos)")
-                        subprocess.check_call(cmd)
-                else:
-                    print("❌ Execução cancelada pelo usuário.")
+        # Fluxo original para novas execuções
         else:
-            # Fluxo original para novas execuções: gerar configs a partir dos parâmetros
             planned_configs = runner.generate_all_configs()
             pending_configs = {
                 name: cfg for name, cfg in planned_configs.items()
                 if name not in runner.existing_exp_names
             }
 
-            print(f"\n📊 Status da Simulação:")
+            print(f"\n📊 Status da Simulação (Nova):")
             print(f"  - {len(planned_configs)} experimentos planejados.")
-            print(f"  - {len(runner.existing_exp_names)} experimentos já concluídos.")
+            print(f"  - {len(runner.existing_exp_names)} experimentos já concluídos (de execuções anteriores no mesmo dir?).")
             print(f"  - {len(pending_configs)} experimentos pendentes para execução.")
+            
+            # Escreve todos os YAMLs pendentes
+            pending_list = []
+            for name, config_data in pending_configs.items():
+                config_path = runner.config_dir / f"{name}.yaml"
+                # Injetar flags extras de otimização
+                config_data['experiment']['reuse_client_model'] = getattr(runner, 'reuse_client_model', False)
+                config_data['experiment']['keras_verbose'] = int(getattr(runner, 'keras_verbose', 0))
+                config_data['server']['max_concurrent_clients'] = getattr(runner, 'max_concurrent_clients', 3)
+                with open(config_path, 'w') as f:
+                    yaml.dump(config_data, f, default_flow_style=False, sort_keys=False)
+                pending_list.append(config_path)
 
-            if pending_configs:
-                runner.estimate_time(pending_configs)
+        # 3. Estimar e Confirmar (Comum a --run e --resume_dir)
+        if pending_list:
+            runner.estimate_time({p.stem: {} for p in pending_list}) # Estima usando a lista pendente
+            
+            print("-" * 40)
+            print(f"Serão gerados {args.jobs} scripts de job para processar {len(pending_list)} configs.")
+            response = input(f"❓ Deseja continuar e preparar os scripts? (y/N): ").lower().strip()
+            print("-" * 40)
 
-                response = input(f"\n❓ Deseja continuar com a execução dos {len(pending_configs)} experimentos pendentes? (y/N): ").lower().strip()
-                if response == 'y':
-                    # Escreve todos os YAMLs pendentes
-                    for name, config_data in pending_configs.items():
-                        config_path = runner.config_dir / f"{name}.yaml"
-                        # Injetar flags extras de otimização na seção experiment/server
-                        config_data['experiment']['reuse_client_model'] = getattr(runner, 'reuse_client_model', False)
-                        config_data['experiment']['keras_verbose'] = int(getattr(runner, 'keras_verbose', 0))
-                        config_data['server']['max_concurrent_clients'] = getattr(runner, 'max_concurrent_clients', 3)
-                        with open(config_path, 'w') as f:
-                            yaml.dump(config_data, f, default_flow_style=False, sort_keys=False)
+            if response == 'y':
+                print(f"\n🛠️  Preparando scripts de job...")
+                
+                num_job_scripts = args.jobs         # Agora N scripts (ex: 2)
+                internal_sim_jobs = 1             # Cada script usará --jobs 1
 
-                    # Executa via simulate_fl.py com paralelismo em processos
-                    simulate_path = Path(__file__).resolve().parent / 'simulate_fl.py'
-                    cmd = [sys.executable, str(simulate_path), '--config', str(runner.config_dir)]
-                    if args.threads:
-                        cmd.append('--threads')
-                    if args.tf_threads is not None:
-                        cmd.extend(['--tf-threads', str(args.tf_threads)])
-                    if args.jobs and args.jobs > 1:
-                        cmd.extend(['--jobs', str(args.jobs)])
-                    print(f"\n🧪 Executando: {' '.join(cmd)}")
-                    subprocess.check_call(cmd)
-                else:
-                    print("❌ Execução cancelada pelo usuário.")
+                print(f"\n🛠️  Preparando {num_job_scripts} script(s) de job...")
+                print(f"   (Cada script usará {internal_sim_jobs} processos paralelos internos via simulate_fl.py)")
 
-        # Seja tendo ou não executado algo, varre UMA vez e reaproveita nos passos seguintes
-        analyzer = ResultAnalyzer(runner.base_dir)
-        analyzer.load_results()
-        runner.save_results_summary(preloaded_results=analyzer.all_results)
+                generate_job_scripts(
+                    runner=runner,
+                    pending_list=pending_list,
+                    jobs=num_job_scripts,         # Passa 2 para gerar run_job_1.sh, run_job_2.sh
+                    sim_jobs=internal_sim_jobs,  # Passa 1 para o comando dentro do script
+                    tf_threads=args.tf_threads
+                )
 
-        print("\n--- INICIANDO ANÁLISE DOS RESULTADOS FINAIS ---")
-        analyzer.run_full_analysis()
+                print_job_instructions(runner.base_dir, num_job_scripts) # Passa 2 para instruções
+                
+            else:
+                print("❌ Preparação cancelada pelo usuário.")
+        else:
+            print("\n✅ Nenhum experimento pendente. Nada a preparar.")
+            print(f"Você pode rodar a análise agora, se desejar:")
+            print(f"python3 \"{Path(__file__).resolve()}\" --analyze_dir \"{runner.base_dir.resolve()}\"")
+            
+        # O script de preparação termina aqui. A execução e análise são passos separados.
 
 
 if __name__ == "__main__":

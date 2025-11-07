@@ -2,7 +2,7 @@ import datetime
 import os
 import threading
 import numpy as np
-from typing import Dict, List, Any, Tuple
+from typing import Dict, List, Tuple
 import logging
 import gc
 import yaml
@@ -43,11 +43,25 @@ class FLSimulator:
         # Configura diretório de saída
         self.run_log = datetime.datetime.now().strftime("%Y%m%d-%H%M%S")
         self.folder_name = f"{self.experiment_config['name']}"
+
+        # --- CORREÇÃO ---
+        # O script run_job_N.sh é executado da raiz da simulação (ex: simulation_XXXXX/)
+        # O output_dir no YAML (ex: simulations/simulation_XXXXX/results) está 
+        # incorreto para este CWD, pois causaria aninhamento.
+        # O diretório de resultados correto é simplesmente 'results/' relativo ao CWD.
+        
+        correct_output_dir = "results" 
+        
         self.base_dir = os.path.join(
-            self.experiment_config.get('output_dir', './results'),
+            correct_output_dir, 
             self.folder_name
         )
         os.makedirs(self.base_dir, exist_ok=True)
+        
+        # Atualiza a config em memória para que o FLServer (que é instanciado a seguir)
+        # também tenha o caminho correto, caso ele precise.
+        self.config['experiment']['output_dir'] = correct_output_dir
+        # --- FIM DA CORREÇÃO ---
 
         # Configurar logging
         self.setup_logging()
@@ -352,27 +366,20 @@ class FLSimulator:
         total_rounds = self.experiment_config['rounds']
         for round_num in range(1, total_rounds + 1):
             self.simulate_round(round_num)
-            # After each round, compute simple ETA based on observed round durations
-            try:
-                round_times = self.server.metrics.get('round_time', [])
-                completed = len(round_times)
-                if completed > 0:
-                    avg = float(np.mean(round_times))
-                    remaining = max(0, total_rounds - completed)
-                    eta_seconds = remaining * avg
-                    # Format ETA into h m s
-                    hrs = int(eta_seconds // 3600)
-                    mins = int((eta_seconds % 3600) // 60)
-                    secs = int(eta_seconds % 60)
-                    msg = (
-                        f"Progresso do experimento: rodada {completed}/{total_rounds} | "
-                        f"média {avg:.2f}s/rodada | ETA ~ {hrs}h {mins}m {secs}s"
-                    )
-                    # Log em arquivo e também imprimir para o terminal
-                    self.logger.info(msg)
-                    print(msg)
-            except Exception:
-                # Não deixar ETA quebrar a simulação
-                pass
-                
+        
+        # Proactive cleanup of large references to help GC before process teardown
+        try:
+            self.server.client_queue = []
+            self.server.active_clients = []
+            if hasattr(self.server, 'round_updates') and isinstance(self.server.round_updates, dict):
+                self.server.round_updates.clear()
+        except Exception:
+            pass
+        try:
+            if isinstance(getattr(self, 'clients', None), dict):
+                self.clients.clear()
+        except Exception:
+            pass
+        gc.collect()
+
         return self.server.metrics
