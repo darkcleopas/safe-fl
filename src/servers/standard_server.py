@@ -585,6 +585,21 @@ class FLServer:
 
                 # Salvar métricas atualizadas
                 self.save_metrics()
+                
+                # Limpar históricos detalhados a cada 10 rodadas para economizar memória
+                # (mantém apenas as últimas 5 rodadas de dados granulares)
+                if self.current_round % 10 == 0:
+                    try:
+                        # Limpar históricos de losses/accuracies individuais de clientes
+                        for key in ['local_losses', 'local_accuracies', 'client_examples', 'client_submission_times']:
+                            if key in self.metrics and isinstance(self.metrics[key], dict):
+                                # Manter apenas as últimas 5 rodadas
+                                recent_rounds = sorted(self.metrics[key].keys())[-5:]
+                                self.metrics[key] = {r: self.metrics[key][r] for r in recent_rounds if r in self.metrics[key]}
+                        gc.collect()
+                        self.logger.info(f"Limpeza de histórico de métricas realizada na rodada {self.current_round}")
+                    except Exception as e:
+                        self.logger.warning(f"Erro ao limpar histórico de métricas: {e}")
             
             # Liberar atualizações da rodada o quanto antes para reduzir pressão de memória
             try:

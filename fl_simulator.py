@@ -8,6 +8,8 @@ import gc
 import yaml
 import math
 import random
+import tensorflow as tf
+import psutil
 
 from src.clients.standard_client import FLClient as BaseFLClient
 from src.servers.standard_server import FLServer
@@ -210,7 +212,25 @@ class FLSimulator:
         
         Args:
             round_num: Current round number
-        """              
+        """
+        # Monitorar uso de memória
+        try:
+            process = psutil.Process()
+            mem_info = process.memory_info()
+            mem_mb = mem_info.rss / 1024 / 1024
+            mem_percent = process.memory_percent()
+            
+            # Alerta se memória ultrapassar 80%
+            if mem_percent > 80:
+                self.logger.warning(f"⚠️  ALERTA: Uso de memória alto: {mem_mb:.1f}MB ({mem_percent:.1f}%)")
+                # Forçar garbage collection agressivo
+                for _ in range(3):
+                    gc.collect()
+                self.logger.info(f"Garbage collection forçado. Nova memória: {process.memory_info().rss / 1024 / 1024:.1f}MB")
+            elif round_num % 5 == 0:  # Log a cada 5 rounds
+                self.logger.info(f"💾 Memória: {mem_mb:.1f}MB ({mem_percent:.1f}%)")
+        except Exception as e:
+            pass  # Falha silenciosa se psutil não disponível              
         # Selecionar clientes considerando apenas aqueles com dados
         available_clients = getattr(self, 'nonempty_client_ids', None)
         self.server.start_round(available_clients=available_clients)
@@ -333,6 +353,19 @@ class FLSimulator:
         
         self.server.check_round_completion()
 
+        # Limpar modelos de clientes se não estiver reutilizando
+        if not self.server.experiment_config.get('reuse_client_model', False):
+            for client_id in selected_client_ids:
+                try:
+                    client = self.clients.get(client_id)
+                    if client and hasattr(client, 'model') and client.model is not None:
+                        del client.model
+                        client.model = None
+                except Exception:
+                    pass
+            # Forçar garbage collection após limpar modelos
+            gc.collect()
+
         # Clean up to free memory
         gc.collect()
             
@@ -366,20 +399,46 @@ class FLSimulator:
         total_rounds = self.experiment_config['rounds']
         for round_num in range(1, total_rounds + 1):
             self.simulate_round(round_num)
+            
+            # Limpeza periódica da sessão TF a cada 10 rounds para evitar acúmulo
+            if round_num % 10 == 0:
+                try:
+                    tf.keras.backend.clear_session()
+                    gc.collect()
+                    self.logger.info(f"🧹 Limpeza de sessão TF realizada no round {round_num}")
+                except Exception as e:
+                    pass
+        
+        # Salvar métricas antes de limpar
+        metrics_to_return = self.server.metrics.copy()
         
         # Proactive cleanup of large references to help GC before process teardown
         try:
-            self.server.client_queue = []
-            self.server.active_clients = []
-            if hasattr(self.server, 'round_updates') and isinstance(self.server.round_updates, dict):
-                self.server.round_updates.clear()
+            # Limpar modelos de clientes
+            for client in self.clients.values():
+                try:
+                    if hasattr(client, 'model') and client.model is not None:
+                        del client.model
+                except Exception:
+                    pass
+            
+            # Limpar servidor
+            if hasattr(self.server, 'model') and self.server.model is not None:
+                del self.server.model
+            del self.server
         except Exception:
             pass
+        
         try:
-            if isinstance(getattr(self, 'clients', None), dict):
-                self.clients.clear()
+            del self.clients
         except Exception:
             pass
-        gc.collect()
+        
+        # Limpar sessão TF agressivamente
+        tf.keras.backend.clear_session()
+        
+        # Forçar múltiplas rodadas de garbage collection
+        for _ in range(3):
+            gc.collect()
 
-        return self.server.metrics
+        return metrics_to_return
