@@ -145,6 +145,13 @@ class FLSimulator:
             self.logger.info(f"Malicious clients saved to {path}")
         except Exception as e:
             self.logger.warning(f"Failed to save malicious clients file: {e}")
+        # Share runtime list with the server for optional instrumentation (e.g., update recorder)
+        self.config['clients']['malicious_client_ids_runtime'] = self.malicious_indices
+        try:
+            if hasattr(self.server, 'update_malicious_client_ids'):
+                self.server.update_malicious_client_ids(self.malicious_indices)
+        except Exception as exc:
+            self.logger.warning(f"Não foi possível atualizar recorder com IDs maliciosos: {exc}")
         
         self.logger.info(f"Initializing {num_clients} clients ({num_malicious} malicious)")
         

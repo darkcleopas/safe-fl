@@ -515,6 +515,7 @@ class ExperimentRunner:
 
         self.save_client_models = False
         self.save_server_intermediate_models = False
+        self.client_update_recorder = None
 
         if resume_dir:
             self.base_dir = Path(resume_dir)
@@ -625,7 +626,7 @@ class ExperimentRunner:
                                                                         'save_server_intermediate_models': self.save_server_intermediate_models,
                                                                         'reuse_client_model': getattr(self, 'reuse_client_model', False),
                                                                         'keras_verbose': int(getattr(self, 'keras_verbose', 0))
-                                                                    },
+                                                                            },
                                                                     'dataset': {
                                                                         'name': dataset_name,
                                                                         'non_iid': bool(non_iid),
@@ -654,6 +655,8 @@ class ExperimentRunner:
                                                                 }
                                                                 if learning_rate is not None:
                                                                     config['model']['learning_rate'] = float(learning_rate)
+                                                                if self.client_update_recorder:
+                                                                    config['experiment']['client_update_recorder'] = self.client_update_recorder
                                                                 planned_configs[exp_name] = config
         return planned_configs
 
@@ -927,6 +930,7 @@ def main():
 
             runner.save_client_models = suite_cfg.get('save_client_models', runner.save_client_models)
             runner.save_server_intermediate_models = suite_cfg.get('save_server_intermediate_models', runner.save_server_intermediate_models)
+            runner.client_update_recorder = suite_cfg.get('client_update_recorder', runner.client_update_recorder)
 
             # Extras passados via experiment
             runner.reuse_client_model = suite_cfg.get('reuse_client_model', False)

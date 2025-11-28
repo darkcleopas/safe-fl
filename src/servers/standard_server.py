@@ -5,7 +5,7 @@ import logging
 import datetime
 import json
 import tensorflow as tf
-from typing import List, Dict, Any, Tuple
+from typing import List, Dict, Any, Tuple, Sequence
 import base64
 import io
 import gc
@@ -16,6 +16,7 @@ import psutil
 from src.utils.strategy_factory import StrategyFactory
 from src.utils.dataset_factory import DatasetFactory
 from src.utils.model_factory import ModelFactory
+from src.utils.client_update_recorder import ClientUpdateRecorder
 
 
 class FLServer:
@@ -51,6 +52,23 @@ class FLServer:
             os.makedirs(self.base_dir, exist_ok=True)
 
         self.save_intermediate_server_models = self.experiment_config.get('save_intermediate_server_models', False)
+        recorder_context = {
+            'experiment_name': self.experiment_config.get('name'),
+            'rounds': self.experiment_config.get('rounds'),
+            'selection_fraction': self.server_config.get('selection_fraction'),
+            'selection_strategy': self.server_config.get('selection_strategy'),
+            'attack_rate': self.clients_config.get('malicious_percentage'),
+            'dataset': self.dataset_config.get('name'),
+            'model': self.model_config.get('type'),
+            'non_iid': self.dataset_config.get('non_iid'),
+            'dirichlet_alpha': self.dataset_config.get('dirichlet_alpha'),
+        }
+        self.client_update_recorder = ClientUpdateRecorder(
+            base_dir=self.base_dir,
+            config=self.experiment_config.get('client_update_recorder'),
+            experiment_context=recorder_context,
+            malicious_client_ids=self.clients_config.get('malicious_client_ids_runtime'),
+        )
 
         # Gerenciamento de clientes para controle de recursos
         self.max_concurrent_clients = config.get('server', {}).get('max_concurrent_clients', 2)
@@ -216,6 +234,10 @@ class FLServer:
         self.logger.info(f"Modelo tem {self.metrics['num_parameters']:,} parâmetros")
         self.logger.info(f"Tamanho do modelo: {self.metrics['model_size_bytes']/1024/1024:.2f} MB")
 
+    def update_malicious_client_ids(self, client_ids: Sequence[int] | None) -> None:
+        if hasattr(self, 'client_update_recorder') and self.client_update_recorder:
+            self.client_update_recorder.update_malicious_client_ids(client_ids or [])
+
     def select_clients(self, round_num: int, available_clients: List[int]) -> List[int]:
         """
         Seleciona os clientes para participar da rodada atual.
@@ -268,14 +290,26 @@ class FLServer:
         self.aggregated_clients_this_round = []
         self.was_model_updated_this_round = False
 
+        if hasattr(self, 'client_update_recorder') and self.client_update_recorder:
+            extra_metadata = {
+                'selection_fraction': self.server_config.get('selection_fraction'),
+                'round': self.current_round,
+            }
+            self.client_update_recorder.record_round(
+                round_index=self.current_round,
+                updates=updates,
+                client_ids=client_ids,
+                extra_metadata=extra_metadata,
+            )
+
+        self.logger.info(f"Iniciando pipeline de defesa para {len(updates)} clientes.")
+
         # Medir memória antes da agregação
         process = psutil.Process(os.getpid())
         memory_before = process.memory_info().rss / 1024 / 1024  # MB
-        
+
         # Medir tempo de agregação
         start_time = time.time()
-        
-        self.logger.info(f"Iniciando pipeline de defesa para {len(updates)} clientes.")
         
         # 1. Aplicar filtros de cliente
         filtered_updates = updates
