@@ -141,7 +141,8 @@ class FLServer:
         self.training_complete = False # Indica se o treinamento foi concluído
         self.round_start_time = None
         self.client_start_times = {}
-        self.previous_global_weights = None
+        # Garante que filtros que dependem dos pesos globais tenham referência desde a rodada 0
+        self.previous_global_weights = [w.copy() for w in self.model.get_weights()]
 
         self.logger.info(f"Servidor inicializado com sucesso.")
     

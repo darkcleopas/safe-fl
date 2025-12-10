@@ -394,39 +394,42 @@ class DynamicLayerPCAFilter(ClientFilterStrategy):
         super().__init__(config)
         # Camadas para inspecionar (focando nos Kernels, pulando bias)
         # Na sua rede: layer_0 (Dense 128), layer_2 (Dense 64), layer_4 (Dense 10)
-        self.warmup_rounds = self.config.get('warmup_rounds', 5)
+        self.warmup_rounds = self.config.get('warmup_rounds', 0)
         self.pca_layers = self.config.get('pca_layers', [0, 2, 4]) # Adapte para os índices das camadas Dense
         self.seed = self.config.get('seed', 42)
         self.pca_components = 2
-        self.layer_momentum: Dict[int, np.ndarray] = {}
+        self.similarity_threshold = 0.3
+        self.winners_strategy = "largest_cluster_similarity"
 
     def filter(
         self, 
         updates: List[Tuple[List[np.ndarray], int]], 
         client_ids: List[int], 
-        server_context: Dict[str, Any] = None
+        server_context: Dict[str, Any]
     ) -> Tuple[List[Tuple[List[np.ndarray], int]], List[int]]:
         
-        current_round = server_context.get('round', 0)
-        previous_global_weights = server_context.get('previous_global_weights')
+        self.current_round = server_context.get('round', 0)
+        self.previous_global_weights = server_context.get('previous_global_weights')
+        if not self.previous_global_weights:
+            raise ValueError("DynamicLayerPCAFilter requer 'previous_global_weights' no contexto do servidor.")
 
         # --- FASE 1: Warm-up ---
-        if current_round < self.warmup_rounds:
-            self.logger.info(f"Round {current_round} (Warm-up).")
+        if self.current_round < self.warmup_rounds:
+            self.logger.info(f"Round {self.current_round} (Warm-up).")
             return updates, client_ids
 
         # --- FASE 2: Clustering Dinâmico por Camada ---
         # Tenta encontrar a melhor separação entre honestos e maliciosos
-        filtered_updates, filtered_ids = self._dynamic_pca_filter(updates, client_ids, previous_global_weights)
+        filtered_updates, filtered_ids = self._dynamic_pca_filter(updates, client_ids)
 
         # Se o filtro PCA não conseguiu separar nada ou sobrou ninguém, retorna vazio
         if not filtered_updates:
             self.logger.warning("Nenhum cliente selecionado no clustering.")
             return [], []
-
+        
         return filtered_updates, filtered_ids
 
-    def _dynamic_pca_filter(self, updates, client_ids, previous_global_weights):
+    def _dynamic_pca_filter(self, updates, client_ids):
         if len(updates) < 3:
             self.logger.info("Poucos clientes (<3) para clustering. Mantendo todos.")
             return updates, client_ids
@@ -434,7 +437,6 @@ class DynamicLayerPCAFilter(ClientFilterStrategy):
         best_score = -1
         best_layer_idx = -1
         best_labels = None
-        best_vectors_matrix = None
         
         # 1. Encontrar a camada que melhor separa os grupos (Melhor Silhouette)
         for layer_idx in self.pca_layers:
@@ -453,126 +455,293 @@ class DynamicLayerPCAFilter(ClientFilterStrategy):
                 # PCA
                 pca = PCA(n_components=self.pca_components)
                 X_pca = pca.fit_transform(X)
-                
-                # KMeans (assumindo 2 grupos: Atacantes vs Honestos)
-                kmeans = KMeans(n_clusters=2, n_init=10, random_state=self.seed)
-                labels = kmeans.fit_predict(X_pca)
-                
-                # Silhouette Score (-1 a 1)
-                try:
+
+                # KMeans
+                max_k = min(4, len(updates) - 1)
+                for k in range(2, max_k + 1):
+                    kmeans = KMeans(n_clusters=k, n_init=10, random_state=self.seed)
+                    labels = kmeans.fit_predict(X_pca)
+                    
+                    # Silhouette Score (-1 a 1)
                     score = silhouette_score(X_pca, labels)
-                except:
-                    score = -1 # Falha se todos forem iguais
-                
-                if score > best_score:
-                    best_score = score
-                    best_layer_idx = layer_idx
-                    best_labels = labels
-                    best_vectors_matrix = X
+
+                    # Bonificação para K=2 (navalha de occam), mas permite K>2 se a separação for muito melhor
+                    if score > best_score:
+                        best_score = score
+                        best_layer_idx = layer_idx
+                        best_labels = labels
+                        best_k = k
                 
             except Exception as e:
                 self.logger.error(f"Erro analisando layer {layer_idx}: {e}")
                 continue
         
-        # Se a separação for muito ruim (score baixo), fallback para manter todos ou clip
-        if best_labels is None or best_score < 0.15:
-            self.logger.info(f"Nenhuma separação clara (Score: {best_score:.3f}). Verificando consenso global.")
-            
-            # Tratamos todos como um único cluster candidato
-            all_indices = list(range(len(updates)))
-            
-            # Usamos a melhor camada encontrada (ou a primeira padrão) para validar
-            target_layer = best_layer_idx if best_layer_idx != -1 else self.pca_layers[0]
-            
-            # Verifica se esse "grande grupo" está alinhado com os pesos globais anteriores
-            if self._validate_single_group(updates, all_indices, target_layer, previous_global_weights):
-                self.logger.info("Grupo único validado (Alinhado com Pesos Globais Anteriores).")
-                return updates, client_ids
-            else:
-                self.logger.warning("Grupo único REJEITADO (Divergente dos Pesos Globais Anteriores).")
-                return [], []
+        # Se não houver separação clara (score muito baixo), assume que todos são honestos ou ataque falhou
+        if best_score < 0.1: 
+            self.logger.info(f"Baixa separação (Score {best_score:.2f}). Aceitando todos.")
+            return updates, client_ids
         
-        # 2. Separar os índices dos dois clusters
-        cluster_0_idxs = [i for i, l in enumerate(best_labels) if l == 0]
-        cluster_1_idxs = [i for i, l in enumerate(best_labels) if l == 1]
+        self.logger.info(f"Melhor separação: Layer {best_layer_idx}, K={best_k}, Score={best_score:.2f}")
+        
+        # 2. Agrupa índices por cluster
+        clusters_idxs = {}
+        for k in range(best_k):
+            clusters_idxs[k] = [i for i, l in enumerate(best_labels) if l == k]
 
         # 3. Eleição baseada em Pesos Globais Anteriores
-        winning_indices = self._select_winning_cluster(
-            best_vectors_matrix, cluster_0_idxs, cluster_1_idxs, best_layer_idx, previous_global_weights
+        winning_indices = self._select_winning_indices(
+            updates, clusters_idxs, best_layer_idx
         )
 
         filtered_updates = [updates[i] for i in winning_indices]
         filtered_ids = [client_ids[i] for i in winning_indices]
 
         self.logger.info(
-            f"Filtro PCA: Layer {best_layer_idx} (Score {best_score:.2f}). "
-            f"Cluster Vencedor: {len(filtered_updates)} clientes (de {len(updates)})."
+            f"Filtro PCA: Layer {best_layer_idx}, K={best_k}, Score {best_score:.2f}. "
+            f"Atualizações Vencedoras: {len(filtered_updates)} clientes (de {len(updates)})."
         )
         return filtered_updates, filtered_ids
 
-    def _select_winning_cluster(self, all_vectors_matrix, idxs_0, idxs_1, layer_idx, previous_global_weights):
+    def _select_winning_indices(self, updates, clusters_idxs, layer_idx):
         """
-        Decide qual cluster é o honesto comparando com os pesos globais anteriores.
+        Decide quais clusters são os honestos de acordo com a estratégia de seleção.
         """
-        global_vec = previous_global_weights[layer_idx].flatten()
+        self.logger.info(f"Estratégia de Seleção: {self.winners_strategy}")
+        global_w_prev = self.previous_global_weights[layer_idx].flatten()
 
-        global_round_mean = np.mean(all_vectors_matrix, axis=0)
-        global_mean_centered = global_vec - global_round_mean
+        # Se não temos histórico de momentum, não podemos julgar a direção.
+        # Fallback: Aceitar o maior cluster (suposição de maioria honesta)
+        # if self.last_global_momentum is None or layer_idx not in self.last_global_momentum:
+        #     self.logger.warning("Sem momentum histórico para esta layer. Escolhendo o maior cluster.")
+        #     largest_cluster_k = max(clusters_idxs, key=lambda k: len(clusters_idxs[k]))
+        #     return clusters_idxs[largest_cluster_k]
         
-        # Função auxiliar para calcular vetor médio de um grupo de índices
-        def get_centered_avg_from_matrix(indices):
-            if not indices: return np.zeros_like(global_vec)
-            # Seleciona linhas específicas da matriz
-            raw_avg = np.mean(all_vectors_matrix[indices], axis=0)
-            return raw_avg - global_round_mean
+        # Seleciona o maior cluster desde que ele não perca a direção histórica
+        if self.winners_strategy == "largest_cluster_similarity":
+            largest_cluster_k = max(clusters_idxs, key=lambda k: len(clusters_idxs[k]))
+            self.logger.info(f"Maior cluster: {largest_cluster_k} (n={len(clusters_idxs[largest_cluster_k])})")
 
-        # Vetores médios dos dois clusters candidatos
-        vec_0 = get_centered_avg_from_matrix(idxs_0)
-        vec_1 = get_centered_avg_from_matrix(idxs_1)
+            # 1. Calcular o peso médio deste cluster
+            cluster_weights_list = [updates[i][0][layer_idx].flatten() for i in clusters_idxs[largest_cluster_k]]
+            cluster_mean_w = np.mean(cluster_weights_list, axis=0)
 
-        # Calcula similaridade de cosseno com o histórico
-        # Sim = 1.0 (Alinhado), Sim = -1.0 (Oposto/Ataque)
-        sim_0 = 1 - cosine(vec_0, global_mean_centered) if np.any(vec_0) else -1
-        sim_1 = 1 - cosine(vec_1, global_mean_centered) if np.any(vec_1) else -1
+            # 2. Calcular o vetor de atualização deste cluster (Delta)
+            # Delta = W_cluster_t - W_global_{t-1}
+            cluster_update_vec = cluster_mean_w - global_w_prev
 
-        self.logger.info(f"Eleição Cluster: C0(n={len(idxs_0)}, sim={sim_0:.3f}) vs C1(n={len(idxs_1)}, sim={sim_1:.3f})")
+            # 3. Cosseno Similaridade com o Histórico
+            dist = cosine(global_w_prev, cluster_update_vec) if np.any(cluster_update_vec) else 1.0
+            similarity = 1.0 - dist
 
-        # Regra de Decisão:
-        # Se ambos positivos, escolhemos o maior
-        if sim_0 > 0 and sim_1 > 0:
-            self.logger.info("Ambos clusters alinhados. Escolhendo o maior.")
-            return idxs_0 if len(idxs_0) >= len(idxs_1) else idxs_1
+            self.logger.info(f"Cluster {largest_cluster_k}: Similaridade Cosine = {similarity:.3f} | Threshold = {self.similarity_threshold:.3f}")
+            return clusters_idxs[largest_cluster_k]
+            # if similarity >= self.similarity_threshold:
+            #     self.logger.info(f"Cluster {largest_cluster_k} aceito pela similaridade.")
+            #     return clusters_idxs[largest_cluster_k]
+            # else:
+            #     self.logger.info(f"Cluster {largest_cluster_k} rejeitado pela similaridade. Rejeitando todos.")
+            #     return []
+
+        elif self.winners_strategy == "clusters_similarity":
+            # Vetor de referência: Direção da atualização global passada
+            accepted_indices = []
+
+            # Iteramos sobre TODOS os clusters encontrados (k=2, 3 ou 4)
+            for k, idxs in clusters_idxs.items():
+                if not idxs: continue
+                
+                # 1. Calcular o peso médio deste cluster
+                cluster_weights_list = [updates[i][0][layer_idx].flatten() for i in idxs]
+                cluster_mean_w = np.mean(cluster_weights_list, axis=0)
+
+                # 2. Calcular o vetor de atualização deste cluster (Delta)
+                # Delta = W_cluster_t - W_global_{t-1}
+                cluster_update_vec = cluster_mean_w - global_w_prev
+
+                # 3. Cosseno Similaridade com o Histórico
+                # 1.0 = Mesmo sentido, 0.0 = Ortogonal, -1.0 = Oposto
+                # Nota: 1 - cosine dá a distância. Queremos a similaridade (1 - dist) ou produto escalar.
+                # A função scipy cosine retorna a DISTÂNCIA (0 a 2).
+                dist = cosine(cluster_update_vec, history_vec) if np.any(cluster_update_vec) else 1.0
+                similarity = 1.0 - dist
+                
+                self.logger.info(f"Cluster {k} (n={len(idxs)}): Similaridade Cosine = {similarity:.3f} | Threshold = {self.similarity_threshold:.3f}")
+
+                # Regra de Decisão:
+                # > 0: A atualização vai na "mesma direção" geral que o treino vinha seguindo.
+                # < 0: A atualização quer reverter o aprendizado anterior (típico de ataques ou dados muito ruidosos).
+                if similarity >= self.similarity_threshold:
+                    accepted_indices.extend(idxs)
+                else:
+                    self.logger.info(f"Cluster {k} rejeitado (direção oposta).")
+
+            # Fallback de segurança: Se todos forem rejeitados (ex: mudança drástica de conceito),
+            # talvez devamos aceitar o que tem maior similaridade (menos negativo) ou rejeitar tudo.
+            # Aqui, vamos garantir que a lista seja ordenada e única
+            return sorted(list(set(accepted_indices)))
+        else:
+            self.logger.warning(f"Estratégia desconhecida: {self.winners_strategy}. Aceitando todos.")
+            return [i for i in range(len(updates))]
+
+
+class PCAGeometricMedianDistanceFilter(ClientFilterStrategy):
+    """
+    Abordagem: Em vez de clusterizar (que falha em Non-IID pois honestos não clusterizam),
+    usamos PCA para projetar em baixa dimensão e calculamos a Mediana Geométrica (ou Component-wise Median).
+    Eliminamos os pontos mais distantes desse centro robusto
+    """
+    def __init__(self, config: Dict[str, Any] = None):
+        super().__init__(config)
+        self.pca_layers = self.config.get('pca_layers', [0, 2, 4]) 
+        self.n_components = self.config.get('n_components', 5)
+        self.warmup_rounds = self.config.get('warmup_rounds', 0)
+        self.discard_fraction = self.config.get('discard_fraction', 0.4)
+        self.seed = self.config.get('seed', 42)
+
+    def filter(
+        self, 
+        updates: List[Tuple[List[np.ndarray], int]], 
+        client_ids: List[int], 
+        server_context: Dict[str, Any]
+    ) -> Tuple[List[Tuple[List[np.ndarray], int]], List[int]]:
         
-        # Se apenas um for positivo, escolhemos ele
-        if sim_0 > 0 and sim_1 < 0:
-            return idxs_0
-        if sim_1 > 0 and sim_0 < 0:
-            return idxs_1
+        current_round = server_context.get('round', 0)
+        if current_round < self.warmup_rounds:
+            return updates, client_ids
 
-        # Se ambos negativos, rejeitamos
-        if sim_0 < -0.1 and sim_1 < -0.1:
-            self.logger.warning("Ambos clusters divergem! Rejeitando rodada.")
-            return []
-    
-    def _validate_single_group(self, updates, indices, layer_idx , previous_global_weights):
-        """Valida um grupo inteiro contra os pesos globais anteriores (para rounds homogêneos)."""
-        global_vec = previous_global_weights[layer_idx].flatten()
+        # 1. Extração (Mesma lógica sua)
+        client_vectors = []
+        valid_indices = []
+        for i, (weights, _) in enumerate(updates):
+            layers = [weights[idx].flatten() for idx in self.pca_layers if idx < len(weights)]
+            if layers:
+                client_vectors.append(np.concatenate(layers))
+                valid_indices.append(i)
 
-        all_vectors_layer = [u[0][layer_idx].flatten() for u in updates]
-        global_round_mean = np.mean(all_vectors_layer, axis=0)
-        global_mean_centered = global_vec - global_round_mean
+        if len(client_vectors) < 3:
+            return updates, client_ids
 
-        def get_centered_avg_vec(indices):
-            if not indices: return np.zeros_like(global_vec)
-            raw_vectors = [updates[i][0][layer_idx].flatten() for i in indices]
-            raw_avg = np.mean(raw_vectors, axis=0)
-            return raw_avg - global_round_mean
-
-        group_vec = get_centered_avg_vec(indices)
-
-        sim = 1 - cosine(group_vec, global_mean_centered)
-        self.logger.info(f"Validação Grupo Único: Cosine Sim = {sim:.3f}")
+        X = np.vstack(client_vectors)
         
-        # Se a similaridade for negativa ou muito baixa, é provável que seja um ataque Label Flipping
-        # onde todos os clientes estão enviando gradientes invertidos.
-        return sim > -0.1
+        # 2. PCA
+        n_comps = min(self.n_components, len(client_vectors) - 1)
+        pca = PCA(n_components=n_comps, random_state=self.seed)
+        X_reduced = pca.fit_transform(X) # PCA centraliza internamente pela média (ainda é um risco, mas menor na dimensão reduzida)
+
+        # 3. A Mágica: Coordinate-wise Median no Espaço Latente
+        # Em vez de média, pegamos a mediana de cada componente principal.
+        # Label Flipping costuma jogar os valores para extremos. A mediana ignora extremos.
+        robust_centroid = np.median(X_reduced, axis=0)
+
+        # 4. Calcular Distância de cada cliente até o Centro Robusto
+        distances = np.linalg.norm(X_reduced - robust_centroid, axis=1)
+
+        # 5. Filtragem baseada em Distância
+        # Mantemos os (1 - discard_fraction) clientes mais próximos do centro
+        num_keep = int(len(client_vectors) * (1 - self.discard_fraction))
+        num_keep = max(num_keep, 2) # Segurança mínima
+
+        # Pega os índices dos 'num_keep' menores valores de distância
+        sorted_indices = np.argsort(distances)
+        keep_local_indices = sorted_indices[:num_keep]
+        
+        # Log para debug visual
+        self.logger.info(f"R{current_round}: Mantendo {num_keep}/{len(client_vectors)}. Distâncias Max Aceita: {distances[keep_local_indices[-1]]:.2f}, Min Rejeitada: {distances[sorted_indices[num_keep]]:.2f}")
+
+        final_indices = [valid_indices[i] for i in keep_local_indices]
+        
+        return [updates[i] for i in final_indices], [client_ids[i] for i in final_indices]
+
+
+class PCAGeometricMedianDirectionFilter(ClientFilterStrategy):
+    """
+    Abordagem: Em vez de clusterizar (que falha em Non-IID pois honestos não clusterizam),
+    usamos PCA para projetar em baixa dimensão e calculamos a Mediana Geométrica (ou Component-wise Median).
+    Eliminamos os pontos mais distantes desse centro robusto
+    """
+    def __init__(self, config: Dict[str, Any] = None):
+        super().__init__(config)
+        self.pca_layers = self.config.get('pca_layers', [0, 2, 4]) 
+        self.n_components = self.config.get('n_components', 5)
+        self.warmup_rounds = self.config.get('warmup_rounds', 0)
+        self.selection_strategy = self.config.get('selection_strategy', 'min_cosine') # 'min_cosine' ou 'discard_fraction'
+        self.min_cosine = self.config.get('min_cosine', 0.4)
+        self.discard_fraction = self.config.get('discard_fraction', 0.4)
+        self.seed = self.config.get('seed', 42)
+
+    def filter(
+        self, 
+        updates: List[Tuple[List[np.ndarray], int]], 
+        client_ids: List[int], 
+        server_context: Dict[str, Any]
+    ) -> Tuple[List[Tuple[List[np.ndarray], int]], List[int]]:
+        
+        current_round = server_context.get('round', 0)
+        if current_round < self.warmup_rounds:
+            return updates, client_ids
+
+        # 1. Extração (Mesma lógica sua)
+        client_vectors = []
+        valid_indices = []
+        for i, (weights, _) in enumerate(updates):
+            layers = [weights[idx].flatten() for idx in self.pca_layers if idx < len(weights)]
+            if layers:
+                client_vectors.append(np.concatenate(layers))
+                valid_indices.append(i)
+
+        if len(client_vectors) < 3:
+            return updates, client_ids
+
+        X = np.vstack(client_vectors)
+        
+        # 2. PCA
+        n_comps = min(self.n_components, len(client_vectors) - 1)
+        pca = PCA(n_components=n_comps, random_state=self.seed)
+        X_reduced = pca.fit_transform(X) # PCA centraliza internamente pela média (ainda é um risco, mas menor na dimensão reduzida)
+
+        # 3. A Mágica: Coordinate-wise Median no Espaço Latente
+        # Em vez de média, pegamos a mediana de cada componente principal.
+        # Label Flipping costuma jogar os valores para extremos. A mediana ignora extremos.
+        robust_vector = np.median(X_reduced, axis=0)
+
+        # 4. Filtragem Baseada em Cosseno (Direção)
+        # cosseno = 1 - distância_cosseno (scipy retorna distância 0..2)
+        # Queremos similaridade: 1.0 (igual), 0.0 (ortogonal), -1.0 (oposto)
+        
+        kept_indices_local = []
+        scores = []
+
+        for i, vec in enumerate(X_reduced):
+            # cosine() do scipy calcula a DISTÂNCIA (Dissimilaridade). 
+            # Sim = 1 - dist.
+            if np.linalg.norm(vec) < 1e-9:
+                sim = 0 # Vetor nulo não contribui
+            else:
+                sim = 1.0 - cosine(vec, robust_vector)
+            
+            scores.append(sim)
+
+            # Aceitamos se apontar para o mesmo hemisfério que a mediana
+            if sim > self.min_cosine:
+                kept_indices_local.append(i)
+
+        if self.selection_strategy == 'discard_fraction':
+            self.logger.info(f"Seleção por discard_fraction={self.discard_fraction}.")
+            # Alternativa: Seleciona os (1 - discard_fraction) mais alinhados
+            num_keep = int(len(client_vectors) * (1 - self.discard_fraction))
+            num_keep = max(num_keep, 2) # Segurança mínima
+
+            sorted_indices = np.argsort(scores)[::-1] # Ordem decrescente
+            kept_indices_local = sorted_indices[:num_keep]
+        else:
+            self.logger.info(f"Seleção por min_cosine={self.min_cosine}.")
+        
+        final_indices = [valid_indices[i] for i in kept_indices_local]
+        
+        # Logs para diagnóstico
+        avg_score = np.mean(scores)
+        
+        # Log para debug visual
+        self.logger.info(f"R{current_round}: Cosseno Médio {avg_score:.2f}. Mantendo {len(final_indices)}/{len(client_vectors)} clientes alinhados.")
+
+        return [updates[i] for i in final_indices], [client_ids[i] for i in final_indices]

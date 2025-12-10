@@ -681,7 +681,7 @@ class ExperimentRunner:
         model_times_per_client = []
         for model_type in model_types_in_suite:
              # Obter o tempo base (para 100 clientes) ou usar o padrão
-            time_base_100_clients = model_time_estimates_per_round.get(model_type, DEFAULT_TIME)
+            time_base_100_clients = model_time_estimates_per_round.get(model_type, DEFAULT_TIME) * np.mean(self.local_epochs)
             # Calcular o tempo por cliente individual
             time_per_client = time_base_100_clients / N_BASE_CLIENTS
             model_times_per_client.append(time_per_client)

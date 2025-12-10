@@ -3,7 +3,14 @@ from typing import Dict, Any, List
 # Importar as novas classes base e implementações
 from src.strategies.abc_strategies import AggregationStrategy, ClientFilterStrategy, GlobalModelFilterStrategy
 from src.strategies.aggregation_strategies import FedAvgStrategy, FedMedianStrategy, TrimmedMeanStrategy
-from src.strategies.client_filter_strategies import AdaptiveL2ClientFilter, KrumClientFilter, ClusteringClientFilter, AdaptiveClusteringClientFilter, DynamicLayerPCAFilter
+from src.strategies.client_filter_strategies import (
+    AdaptiveL2ClientFilter, KrumClientFilter,
+    ClusteringClientFilter,
+    AdaptiveClusteringClientFilter,
+    DynamicLayerPCAFilter,
+    PCAGeometricMedianDistanceFilter,
+    PCAGeometricMedianDirectionFilter
+)
 from src.strategies.global_model_filter_strategies import AdaptiveL2GlobalModelFilter
 
 class StrategyFactory:
@@ -22,6 +29,8 @@ class StrategyFactory:
         "CLUSTERING": ClusteringClientFilter,
         "ADAPTIVE_CLUSTERING": AdaptiveClusteringClientFilter,
         "DYNAMIC_LAYER_PCA": DynamicLayerPCAFilter,
+        "PCA_GEOMETRIC_MEDIAN_DISTANCE": PCAGeometricMedianDistanceFilter,
+        "PCA_GEOMETRIC_MEDIAN_DIRECTION": PCAGeometricMedianDirectionFilter,
     }
     
     GLOBAL_MODEL_FILTER_MAP = {
