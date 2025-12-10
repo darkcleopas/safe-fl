@@ -1,0 +1,169 @@
+# Suite de pipelines de defesa com variações para Mestrado (Versão Otimizada)
+selection_strategy: [random]
+model_name: [CNN_MNIST]
+dataset_name: [MNIST]
+rounds: [50]
+num_clients: [100]
+local_epochs: [2]
+batch_size: [128]
+learning_rate: [1.0e-2]
+seed: [42]
+save_client_models: false
+save_server_intermediate_models: false
+reuse_client_model: true
+keras_verbose: 0
+max_concurrent_clients: 32
+
+# --- Parâmetros da Simulação ---
+attack_rates: [0.0, 0.2, 0.3, 0.4, 0.5, 0.6]
+selection_fractions: [1.0]
+non_iid: [false, true]
+dirichlet_alpha: [0.1]
+
+# Pipelines de defesa mapeados do código
+defense_pipelines:
+  # --- Baselines Padrão ---
+  Média Ponderada (Baseline):
+    client_filters: []
+    aggregation_strategy:
+      name: FED_AVG
+      params: {}
+    global_model_filter: null
+
+  Média Aparada:
+    client_filters: []
+    aggregation_strategy:
+      name: TRIMMED_MEAN
+      params:
+        trim_ratio: 0.4
+    global_model_filter: null
+
+  Filtro Krum + Média Ponderada:
+    client_filters:
+      - name: KRUM
+        params: {}
+    aggregation_strategy:
+      name: FED_AVG
+    global_model_filter: null
+
+  Filtro Multi-Krum + Média Ponderada:
+    client_filters:
+      - name: MULTI_KRUM
+        params: {}
+    aggregation_strategy:
+      name: FED_AVG
+    global_model_filter: null
+
+  Filtro Clustering + Média Ponderada:
+    client_filters:
+      - name: CLUSTERING
+        params: {}
+    aggregation_strategy:
+      name: FED_AVG
+    global_model_filter: null
+
+  # --- Novas Defesas
+  
+  Filtro PCA Geometric Median Distance + Média Ponderada (df=0.4):
+    client_filters:
+      - name: PCA_GEOMETRIC_MEDIAN_DISTANCE
+        params:
+          pca_layers: [2, 4, 6]
+          n_components: 5
+          warmup_rounds: 0
+          discard_fraction: 0.4
+    aggregation_strategy:
+      name: FED_AVG
+    global_model_filter: null
+  
+  Filtro PCA Geometric Median Distance + Média Aparada (df=0.4):
+    client_filters:
+      - name: PCA_GEOMETRIC_MEDIAN_DISTANCE
+        params:
+          pca_layers: [2, 4, 6]
+          n_components: 5
+          warmup_rounds: 0
+          discard_fraction: 0.4
+    aggregation_strategy:
+      name: TRIMMED_MEAN
+      params:
+        trim_ratio: 0.4
+    global_model_filter: null
+  
+  Filtro PCA Geometric Median Direction + Média Ponderada (mc=0):
+    client_filters:
+      - name: PCA_GEOMETRIC_MEDIAN_DIRECTION
+        params:
+          pca_layers: [2, 4, 6]
+          n_components: 5
+          warmup_rounds: 0
+          selection_strategy: "min_cosine"
+          min_cosine: 0.0
+    aggregation_strategy:
+      name: FED_AVG
+    global_model_filter: null
+  
+  Filtro PCA Geometric Median Direction + Média Ponderada (mc=-0.4):
+    client_filters:
+      - name: PCA_GEOMETRIC_MEDIAN_DIRECTION
+        params:
+          pca_layers: [2, 4, 6]
+          n_components: 5
+          warmup_rounds: 0
+          selection_strategy: "min_cosine"
+          min_cosine: -0.4
+    aggregation_strategy:
+      name: FED_AVG
+    global_model_filter: null
+
+  Filtro PCA Geometric Median Direction + Média Ponderada (mc=-0.6):
+    client_filters:
+      - name: PCA_GEOMETRIC_MEDIAN_DIRECTION
+        params:
+          pca_layers: [2, 4, 6]
+          n_components: 5
+          warmup_rounds: 0
+          selection_strategy: "min_cosine"
+          min_cosine: -0.6
+    aggregation_strategy:
+      name: FED_AVG
+    global_model_filter: null
+  
+  Filtro PCA Geometric Median Direction + Média Ponderada (df=0.2):
+    client_filters:
+      - name: PCA_GEOMETRIC_MEDIAN_DIRECTION
+        params:
+          pca_layers: [2, 4, 6]
+          n_components: 5
+          warmup_rounds: 0
+          selection_strategy: "discard_fraction"
+          discard_fraction: 0.2
+    aggregation_strategy:
+      name: FED_AVG
+    global_model_filter: null
+  
+  Filtro PCA Geometric Median Direction + Média Ponderada (df=0.4):
+    client_filters:
+      - name: PCA_GEOMETRIC_MEDIAN_DIRECTION
+        params:
+          pca_layers: [2, 4, 6]
+          n_components: 5
+          warmup_rounds: 0
+          selection_strategy: "discard_fraction"
+          discard_fraction: 0.4
+    aggregation_strategy:
+      name: FED_AVG
+    global_model_filter: null
+
+  Filtro PCA Geometric Median Direction + Média Ponderada (df=0.6):
+    client_filters:
+      - name: PCA_GEOMETRIC_MEDIAN_DIRECTION
+        params:
+          pca_layers: [2, 4, 6]
+          n_components: 5
+          warmup_rounds: 0
+          selection_strategy: "discard_fraction"
+          discard_fraction: 0.6
+    aggregation_strategy:
+      name: FED_AVG
+    global_model_filter: null
