@@ -596,7 +596,6 @@ class PCAGeometricMedianDistanceFilter(ClientFilterStrategy):
         self.n_components = self.config.get('n_components', 5)
         self.warmup_rounds = self.config.get('warmup_rounds', 0)
         self.discard_fraction = self.config.get('discard_fraction', 0.4)
-        self.seed = self.config.get('seed', 42)
 
     def filter(
         self, 
@@ -604,6 +603,8 @@ class PCAGeometricMedianDistanceFilter(ClientFilterStrategy):
         client_ids: List[int], 
         server_context: Dict[str, Any]
     ) -> Tuple[List[Tuple[List[np.ndarray], int]], List[int]]:
+        
+        self.seed = server_context.get('seed', 42)
         
         current_round = server_context.get('round', 0)
         if current_round < self.warmup_rounds:
@@ -667,7 +668,6 @@ class PCAGeometricMedianDirectionFilter(ClientFilterStrategy):
         self.selection_strategy = self.config.get('selection_strategy', 'min_cosine') # 'min_cosine' ou 'discard_fraction'
         self.min_cosine = self.config.get('min_cosine', 0.4)
         self.discard_fraction = self.config.get('discard_fraction', 0.4)
-        self.seed = self.config.get('seed', 42)
 
     def filter(
         self, 
@@ -675,6 +675,8 @@ class PCAGeometricMedianDirectionFilter(ClientFilterStrategy):
         client_ids: List[int], 
         server_context: Dict[str, Any]
     ) -> Tuple[List[Tuple[List[np.ndarray], int]], List[int]]:
+        
+        self.seed = server_context.get('seed', 42)
         
         current_round = server_context.get('round', 0)
         if current_round < self.warmup_rounds:

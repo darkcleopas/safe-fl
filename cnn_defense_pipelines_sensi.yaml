@@ -6,7 +6,7 @@ num_clients: [100]
 local_epochs: [2]
 batch_size: [128]
 learning_rate: [1.0e-2]
-seed: [42]
+seed: [42, 19, 27]
 save_client_models: false
 save_server_intermediate_models: false
 reuse_client_model: true

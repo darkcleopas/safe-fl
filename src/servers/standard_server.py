@@ -317,7 +317,8 @@ class FLServer:
         filtered_client_ids = client_ids
         context = {
             'round': self.current_round,
-            'previous_global_weights': self.previous_global_weights
+            'previous_global_weights': self.previous_global_weights,
+            'seed': self.seed,
         }
         for client_filter in self.client_filters:
             if not filtered_updates: break
